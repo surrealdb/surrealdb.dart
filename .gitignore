@@ -1,0 +1,12 @@
+# Dart and Flutter
+.dart_tool/
+.packages
+build/
+doc/api/
+
+# Published packages commit pubspec.lock only for applications, not libraries.
+pubspec.lock
+
+# Coverage
+coverage/
+.test_coverage.dart
