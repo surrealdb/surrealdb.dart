@@ -1,10 +1,9 @@
-# surrealdb
+# surrealdb.dart
 
 A Dart and Flutter client for [SurrealDB](https://surrealdb.com) and the
-Spectron agent memory API. It speaks CBOR over WebSocket and HTTP, returns the
-rich SurrealDB data types as Dart objects, and exposes live queries as streams.
+Spectron agent memory API.
 
-The package works in any Dart project and on every Flutter target (Android, iOS,
+The SDK works with any Dart project and on every Flutter target (Android, iOS,
 web, and desktop), since it depends only on portable packages.
 
 ## Features
