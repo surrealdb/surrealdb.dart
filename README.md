@@ -1,7 +1,7 @@
 # surrealdb.dart
 
 A Dart and Flutter client for [SurrealDB](https://surrealdb.com) and the
-Spectron agent memory API.
+[Agent Memory](https://surrealdb.com/agent-memory) API.
 
 The SDK works with any Dart project and on every Flutter target (Android, iOS,
 web, and desktop), since it depends only on portable packages.
@@ -19,7 +19,7 @@ web, and desktop), since it depends only on portable packages.
   `Decimal`, `SurrealDuration`, `SurrealDateTime`, `SurrealFuture`, `FileRef`,
   and the geometry types, all carried losslessly through the CBOR codec.
 - Record access, system user, and bearer authentication.
-- A standalone client for the Spectron memory API.
+- A standalone client for the Agent Memory API.
 
 ## Installation
 
@@ -164,16 +164,16 @@ For web targets, use a `ws` or `wss` URL. The WebSocket engine uses the
 platform WebSocket through `web_socket_channel`, so it runs on mobile, desktop,
 and web without changes.
 
-## Spectron
+## Agent Memory
 
-The Spectron client is a separate import and does not depend on the database
+The Agent Memory client is a separate import and does not depend on the database
 driver:
 
 ```dart
-import 'package:surrealdb/spectron.dart';
+import 'package:surrealdb/memory.dart';
 
 Future<void> main() async {
-  final client = Spectron(
+  final client = AgentMemory(
     endpoint: 'https://memory.example.com',
     context: 'acme-prod',
     apiKey: 'sp-your-key',
@@ -195,7 +195,7 @@ Future<void> main() async {
 Run the unit tests, which need no server:
 
 ```sh
-dart test test/cbor test/value test/spectron
+dart test test/cbor test/value test/memory
 ```
 
 Run the integration tests against a local server:

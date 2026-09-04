@@ -18,7 +18,7 @@ jobs:
       - name: Analyze
         run: dart analyze --fatal-infos
       - name: Run unit tests
-        run: dart test test/cbor test/value test/spectron
+        run: dart test test/cbor test/value test/memory
 
   integration:
     runs-on: ubuntu-latest

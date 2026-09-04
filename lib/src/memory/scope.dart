@@ -1,4 +1,4 @@
-/// A scope expression, in any of the ergonomic forms Spectron accepts.
+/// A scope expression, in any of the ergonomic forms AgentMemory accepts.
 ///
 /// Supported shapes:
 /// - A single path string, for example `'team/eng'`.

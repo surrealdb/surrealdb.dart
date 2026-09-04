@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:surrealdb/spectron.dart';
+import 'package:surrealdb/memory.dart';
 import 'package:test/test.dart';
 
 Stream<List<int>> _sse(List<String> frames) async* {
