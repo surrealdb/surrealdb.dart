@@ -7,7 +7,7 @@ import 'scope.dart';
 import 'streaming.dart';
 import 'transport.dart';
 
-/// A single message in a batch passed to [Spectron.rememberMany].
+/// A single message in a batch passed to [AgentMemory.rememberMany].
 class BatchMessage {
   const BatchMessage(
       {required this.role, required this.content, this.timestamp});
@@ -23,7 +23,7 @@ class BatchMessage {
       };
 }
 
-/// A knowledge graph triple passed to [Spectron.remember].
+/// A knowledge graph triple passed to [AgentMemory.remember].
 class Triple {
   const Triple({
     required this.entityType,
@@ -50,14 +50,14 @@ class Triple {
       };
 }
 
-/// The official client for the Spectron agent memory API.
+/// The official client for the SurrealDB Agent Memory API.
 ///
 /// Construct a client with an [endpoint], [context], and [apiKey], then call
 /// the memory operations. The client is pinned to one context, every request
 /// targets `/api/v1/{context}/...`.
 ///
 /// ```dart
-/// final client = Spectron(
+/// final client = AgentMemory(
 ///   endpoint: 'https://memory.example.com',
 ///   context: 'acme-prod',
 ///   apiKey: '...',
@@ -65,15 +65,15 @@ class Triple {
 /// await client.remember('I was promoted to CTO', scopes: 'user/tobie');
 /// final hits = await client.recall("What is Tobie's role?", k: 10);
 /// ```
-class Spectron {
-  Spectron({
+class AgentMemory {
+  AgentMemory({
     required String endpoint,
     required this.context,
     required String apiKey,
     Duration timeout = const Duration(seconds: 30),
     int maxRetries = 3,
     http.Client? httpClient,
-  }) : _transport = SpectronTransport(TransportOptions(
+  }) : _transport = AgentMemoryTransport(TransportOptions(
           endpoint: _trimTrailingSlash(endpoint),
           apiKey: apiKey,
           timeout: timeout,
@@ -81,19 +81,20 @@ class Spectron {
           client: httpClient,
         ));
 
-  Spectron._fromTransport(this._transport, this.context);
+  AgentMemory._fromTransport(this._transport, this.context);
 
   /// The context this client is pinned to.
   final String context;
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
 
   String get _prefix => '/api/v1/$context';
 
   /// Returns a client that acts on behalf of another principal. Requires the
   /// `manage` grant.
-  Spectron onBehalfOf(String principalId) => Spectron._fromTransport(
-        SpectronTransport(_transport.options.copyWith(onBehalfOf: principalId)),
+  AgentMemory onBehalfOf(String principalId) => AgentMemory._fromTransport(
+        AgentMemoryTransport(
+            _transport.options.copyWith(onBehalfOf: principalId)),
         context,
       );
 
@@ -441,7 +442,7 @@ List<Map<String, dynamic>> _list(Object? value) =>
 class Documents {
   Documents(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   /// Document keyword operations.
@@ -527,7 +528,7 @@ class Documents {
 class DocumentKeywords {
   DocumentKeywords(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<Map<String, dynamic>> list({
@@ -559,7 +560,7 @@ class DocumentKeywords {
 class Entities {
   Entities(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<Map<String, dynamic>> list({String? type}) async =>
@@ -588,7 +589,7 @@ class Entities {
 class Sessions {
   Sessions(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<Map<String, dynamic>> create({
@@ -621,7 +622,7 @@ class Sessions {
 class Lifecycle {
   Lifecycle(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<Map<String, dynamic>> expire() async => _map(await _transport.request(
@@ -635,7 +636,7 @@ class Lifecycle {
 class Traces {
   Traces(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<Map<String, dynamic>> list({int? limit}) async =>
@@ -656,7 +657,7 @@ class Traces {
 class Principals {
   Principals(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<List<Map<String, dynamic>>> list() async => _list(
@@ -697,7 +698,7 @@ class Principals {
 class Scopes {
   Scopes(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<List<Map<String, dynamic>>> list() async =>
@@ -731,7 +732,7 @@ class Scopes {
 class Keys {
   Keys(this._transport, this._prefix);
 
-  final SpectronTransport _transport;
+  final AgentMemoryTransport _transport;
   final String _prefix;
 
   Future<Map<String, dynamic>> create({

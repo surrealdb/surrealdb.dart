@@ -1,11 +1,11 @@
 // ignore_for_file: avoid_print
-// Talks to a Spectron memory service. Set the endpoint, context, and API key
+// Talks to an Agent Memory service. Set the endpoint, context, and API key
 // for your deployment, then:
-//   dart run example/spectron_example.dart
-import 'package:surrealdb/spectron.dart';
+//   dart run example/memory_example.dart
+import 'package:surrealdb/memory.dart';
 
 Future<void> main() async {
-  final client = Spectron(
+  final client = AgentMemory(
     endpoint: 'https://memory.example.com',
     context: 'acme-prod',
     apiKey: 'sp-your-key',

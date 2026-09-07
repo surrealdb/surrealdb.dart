@@ -1,5 +1,5 @@
 name: surrealdb
-description: A Dart and Flutter client for SurrealDB and the Spectron memory API, with CBOR over WebSocket and HTTP.
+description: A Dart and Flutter client for SurrealDB and the Agent Memory API, with CBOR over WebSocket and HTTP.
 version: 0.1.0
 repository: https://github.com/surrealdb-dev/surrealdb.dart
 issue_tracker: https://github.com/surrealdb-dev/surrealdb.dart/issues

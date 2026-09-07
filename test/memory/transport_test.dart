@@ -2,14 +2,14 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:surrealdb/spectron.dart';
+import 'package:surrealdb/memory.dart';
 import 'package:test/test.dart';
 
 Map<String, String> _lowerKeys(Map<String, String> headers) =>
     {for (final entry in headers.entries) entry.key.toLowerCase(): entry.value};
 
 void main() {
-  group('Spectron transport', () {
+  group('AgentMemory transport', () {
     test('sends auth and idempotency headers on remember', () async {
       late http.Request captured;
       final client = MockClient((request) async {
@@ -18,14 +18,14 @@ void main() {
             headers: {'content-type': 'application/json'});
       });
 
-      final spectron = Spectron(
+      final memory = AgentMemory(
         endpoint: 'https://memory.test',
         context: 'acme',
         apiKey: 'secret',
         httpClient: client,
       );
 
-      await spectron.remember('hello', scopes: 'user/tobie');
+      await memory.remember('hello', scopes: 'user/tobie');
 
       expect(captured.method, 'POST');
       expect(captured.url.path, '/api/v1/acme/facts');
@@ -49,14 +49,14 @@ void main() {
             headers: {'content-type': 'application/json'});
       });
 
-      final spectron = Spectron(
+      final memory = AgentMemory(
         endpoint: 'https://memory.test',
         context: 'acme',
         apiKey: 'secret',
         httpClient: client,
       );
 
-      final result = await spectron.state();
+      final result = await memory.state();
       expect(result, isA<Map<String, dynamic>>());
       expect(calls, 3);
     });
@@ -65,7 +65,7 @@ void main() {
       final client = MockClient(
           (request) async => http.Response('{"title":"missing"}', 404));
 
-      final spectron = Spectron(
+      final memory = AgentMemory(
         endpoint: 'https://memory.test',
         context: 'acme',
         apiKey: 'secret',
@@ -73,7 +73,7 @@ void main() {
       );
 
       expect(
-        () => spectron.documents.get('nope'),
+        () => memory.documents.get('nope'),
         throwsA(isA<NotFoundError>()),
       );
     });
@@ -85,7 +85,7 @@ void main() {
         return http.Response('{"title":"boom"}', 500);
       });
 
-      final spectron = Spectron(
+      final memory = AgentMemory(
         endpoint: 'https://memory.test',
         context: 'acme',
         apiKey: 'secret',
@@ -93,7 +93,7 @@ void main() {
       );
 
       await expectLater(
-        spectron.documents.delete('id'),
+        memory.documents.delete('id'),
         throwsA(isA<ServerError>()),
       );
       expect(calls, 1);

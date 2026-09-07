@@ -7,12 +7,12 @@ import 'errors.dart';
 import 'idempotency.dart';
 
 /// The client version reported in the `User-Agent` header.
-const String spectronClientVersion = '0.1.0';
+const String agentMemoryClientVersion = '0.1.0';
 
 /// The backoff schedule, in milliseconds, applied between retries.
 const List<int> backoffSchedule = [250, 500, 1000];
 
-/// Configuration for a [SpectronTransport].
+/// Configuration for a [AgentMemoryTransport].
 class TransportOptions {
   const TransportOptions({
     required this.endpoint,
@@ -23,7 +23,7 @@ class TransportOptions {
     this.client,
   });
 
-  /// The origin of the Spectron service, without a trailing slash.
+  /// The origin of the AgentMemory service, without a trailing slash.
   final String endpoint;
 
   /// The API key sent as a bearer token.
@@ -51,10 +51,11 @@ class TransportOptions {
       );
 }
 
-/// Handles the HTTP details of talking to the Spectron API: headers, retries,
+/// Handles the HTTP details of talking to the AgentMemory API: headers, retries,
 /// idempotency keys, error mapping, and server sent event streams.
-class SpectronTransport {
-  SpectronTransport(this.options) : _client = options.client ?? http.Client();
+class AgentMemoryTransport {
+  AgentMemoryTransport(this.options)
+      : _client = options.client ?? http.Client();
 
   final TransportOptions options;
   final http.Client _client;
@@ -92,7 +93,7 @@ class SpectronTransport {
           return null;
         }
         return jsonDecode(utf8.decode(response.bodyBytes));
-      } on SpectronError catch (error) {
+      } on AgentMemoryError catch (error) {
         if (!_retryable(canRetry, error.status) ||
             attempt >= options.maxRetries) {
           rethrow;
@@ -184,7 +185,7 @@ class SpectronTransport {
       {
         'Authorization': 'Bearer ${options.apiKey}',
         'Accept': accept,
-        'User-Agent': 'surrealdb-spectron-dart/$spectronClientVersion',
+        'User-Agent': 'surrealdb-memory-dart/$agentMemoryClientVersion',
         if (hasJsonBody) 'Content-Type': 'application/json',
         if (options.onBehalfOf != null)
           'X-Spectron-On-Behalf-Of': options.onBehalfOf!,
@@ -200,7 +201,7 @@ class SpectronTransport {
     return Duration(milliseconds: backoffSchedule[index]);
   }
 
-  SpectronError _errorFor(http.Response response) {
+  AgentMemoryError _errorFor(http.Response response) {
     Map<String, dynamic> body;
     try {
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));

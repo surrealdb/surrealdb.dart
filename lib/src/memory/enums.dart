@@ -1,4 +1,4 @@
-/// How much inference Spectron should run when storing a memory.
+/// How much inference AgentMemory should run when storing a memory.
 enum InferMode {
   full('full'),
   triples('triples'),

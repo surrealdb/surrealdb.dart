@@ -1,8 +1,8 @@
-/// Base class for every error raised by the Spectron client.
+/// Base class for every error raised by the AgentMemory client.
 ///
-/// Follows the RFC 7807 Problem Details shape returned by the Spectron API.
-class SpectronError implements Exception {
-  const SpectronError({
+/// Follows the RFC 7807 Problem Details shape returned by the AgentMemory API.
+class AgentMemoryError implements Exception {
+  const AgentMemoryError({
     required this.status,
     required this.title,
     this.detail,
@@ -31,29 +31,29 @@ class SpectronError implements Exception {
 
   @override
   String toString() =>
-      'SpectronError($status, $title${detail == null ? '' : ', $detail'})';
+      'AgentMemoryError($status, $title${detail == null ? '' : ', $detail'})';
 }
 
 /// Authentication failed or is missing (HTTP 401).
-class AuthError extends SpectronError {
+class AuthError extends AgentMemoryError {
   const AuthError({required super.title, super.detail, super.extensions})
       : super(status: 401);
 }
 
 /// The caller lacks the scope or grant required (HTTP 403).
-class ScopeError extends SpectronError {
+class ScopeError extends AgentMemoryError {
   const ScopeError({required super.title, super.detail, super.extensions})
       : super(status: 403);
 }
 
 /// The requested resource does not exist (HTTP 404).
-class NotFoundError extends SpectronError {
+class NotFoundError extends AgentMemoryError {
   const NotFoundError({required super.title, super.detail, super.extensions})
       : super(status: 404);
 }
 
 /// The request was rejected as invalid (HTTP 400 or 422).
-class ValidationError extends SpectronError {
+class ValidationError extends AgentMemoryError {
   const ValidationError({
     required super.status,
     required super.title,
@@ -63,7 +63,7 @@ class ValidationError extends SpectronError {
 }
 
 /// The caller is being rate limited (HTTP 429).
-class RateLimitError extends SpectronError {
+class RateLimitError extends AgentMemoryError {
   const RateLimitError({
     required super.title,
     super.detail,
@@ -76,7 +76,7 @@ class RateLimitError extends SpectronError {
 }
 
 /// The server failed to handle the request (HTTP 5xx).
-class ServerError extends SpectronError {
+class ServerError extends AgentMemoryError {
   const ServerError({
     required super.status,
     required super.title,
@@ -86,13 +86,13 @@ class ServerError extends SpectronError {
 }
 
 /// A network level failure, such as a timeout or a refused connection.
-class ConnectionError extends SpectronError {
+class ConnectionError extends AgentMemoryError {
   const ConnectionError({required super.title, super.detail})
       : super(status: 0);
 }
 
-/// Builds the right [SpectronError] subclass from a response.
-SpectronError errorFromResponse(
+/// Builds the right [AgentMemoryError] subclass from a response.
+AgentMemoryError errorFromResponse(
   int status,
   Map<String, dynamic> body, {
   Duration? retryAfter,
@@ -130,7 +130,7 @@ SpectronError errorFromResponse(
     return ServerError(
         status: status, title: title, detail: detail, extensions: extensions);
   }
-  return SpectronError(
+  return AgentMemoryError(
     status: status,
     title: title,
     detail: detail,
