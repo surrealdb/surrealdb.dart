@@ -17,13 +17,16 @@ class WebSocketEngine implements Engine {
   WebSocketEngine(
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
+    Duration? requestTimeout = const Duration(seconds: 30),
   })  : _codec = codec,
         _protocol = RpcProtocol(codec),
-        _reconnect = reconnect;
+        _reconnect = reconnect,
+        _requestTimeout = requestTimeout;
 
   final SurrealCodec _codec;
   final RpcProtocol _protocol;
   final ReconnectOptions _reconnect;
+  final Duration? _requestTimeout;
   final _pending = <String, Completer<Object?>>{};
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _liveController = StreamController<LiveMessage>.broadcast();
@@ -147,9 +150,44 @@ class WebSocketEngine implements Engine {
     _pending[id] = completer;
     final payload = _protocol.encodeRequest(id, method, params);
     channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
-    final result = await completer.future;
+    final timeout = _requestTimeout;
+    final Object? result;
+    if (timeout == null) {
+      result = await completer.future;
+    } else {
+      result = await completer.future.timeout(timeout, onTimeout: () {
+        // Forget the request, so a late reply is dropped.
+        _pending.remove(id);
+        // The server may still have applied a change to the session, so it
+        // may no longer match the one tracked here. Start again on a new
+        // socket, which restores the session as it is known.
+        if (_sessionMethods.contains(method)) _resetChannel(channel);
+        throw RequestTimeoutError(method, timeout);
+      });
+    }
     _trackSession(method, params, result);
     return result;
+  }
+
+  /// Calls that change the server's session.
+  static const _sessionMethods = {
+    'use',
+    'signin',
+    'signup',
+    'authenticate',
+    'invalidate',
+    'let',
+    'unset',
+  };
+
+  /// Abandons [channel] as if the server had dropped it, so the usual
+  /// reconnect follows.
+  void _resetChannel(WebSocketChannel channel) {
+    if (!identical(_channel, channel)) return;
+    final subscription = _subscription;
+    _onDisconnected(null);
+    unawaited(subscription?.cancel());
+    unawaited(_closeChannel(channel));
   }
 
   void _trackSession(String method, List<Object?> params, Object? result) {

@@ -109,12 +109,12 @@ class FakeSurrealServer {
       requests.add(req);
       switch (handler(req)) {
         case FakeResult(:final result):
-          socket.add(_codec.encode({'id': req.id, 'result': result}));
+          _send(socket, {'id': req.id, 'result': result});
         case FakeError(:final message, :final code, :final extra):
-          socket.add(_codec.encode({
+          _send(socket, {
             'id': req.id,
             'error': {'code': code, 'message': message, ...extra},
-          }));
+          });
         case FakeSilence():
           break;
       }
@@ -124,9 +124,17 @@ class FakeSurrealServer {
   /// Sends a message that is not a reply, such as a live notification.
   void push(Object? message) {
     for (final socket in _sockets) {
-      if (socket.readyState == WebSocket.open) {
-        socket.add(_codec.encode(message));
-      }
+      _send(socket, message);
+    }
+  }
+
+  /// Sends on [socket] unless it has already closed.
+  void _send(WebSocket socket, Object? message) {
+    if (socket.readyState != WebSocket.open) return;
+    try {
+      socket.add(_codec.encode(message));
+    } on StateError {
+      // The socket closed between the check and the write.
     }
   }
 
