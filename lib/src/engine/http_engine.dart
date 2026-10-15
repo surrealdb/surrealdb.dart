@@ -16,15 +16,20 @@ import 'rpc.dart';
 /// header state rather than making a round trip, and live queries are not
 /// supported.
 class HttpEngine implements Engine {
-  HttpEngine(SurrealCodec codec, {http.Client? client})
-      : _codec = codec,
+  HttpEngine(
+    SurrealCodec codec, {
+    http.Client? client,
+    Duration? requestTimeout = const Duration(seconds: 30),
+  })  : _codec = codec,
         _protocol = RpcProtocol(codec),
-        _client = client ?? http.Client();
+        _client = client ?? http.Client(),
+        _requestTimeout = requestTimeout;
 
   final SurrealCodec _codec;
   final RpcProtocol _protocol;
 
   final http.Client _client;
+  final Duration? _requestTimeout;
   final _statusController = StreamController<ConnectionStatus>.broadcast();
 
   Uri? _url;
@@ -117,7 +122,12 @@ class HttpEngine implements Engine {
       if (_namespace != null) 'Surreal-NS': _namespace!,
       if (_database != null) 'Surreal-DB': _database!,
     };
-    final response = await _client.post(_url!, headers: headers, body: body);
+    final request = _client.post(_url!, headers: headers, body: body);
+    final timeout = _requestTimeout;
+    final response = timeout == null
+        ? await request
+        : await request.timeout(timeout,
+            onTimeout: () => throw RequestTimeoutError(method, timeout));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
         'Request failed with status ${response.statusCode}',

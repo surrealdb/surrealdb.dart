@@ -17,13 +17,16 @@ class WebSocketEngine implements Engine {
   WebSocketEngine(
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
+    Duration? requestTimeout = const Duration(seconds: 30),
   })  : _codec = codec,
         _protocol = RpcProtocol(codec),
-        _reconnect = reconnect;
+        _reconnect = reconnect,
+        _requestTimeout = requestTimeout;
 
   final SurrealCodec _codec;
   final RpcProtocol _protocol;
   final ReconnectOptions _reconnect;
+  final Duration? _requestTimeout;
   final _pending = <String, Completer<Object?>>{};
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _liveController = StreamController<LiveMessage>.broadcast();
@@ -147,7 +150,17 @@ class WebSocketEngine implements Engine {
     _pending[id] = completer;
     final payload = _protocol.encodeRequest(id, method, params);
     channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
-    final result = await completer.future;
+    final timeout = _requestTimeout;
+    final Object? result;
+    if (timeout == null) {
+      result = await completer.future;
+    } else {
+      result = await completer.future.timeout(timeout, onTimeout: () {
+        // Forget the request, so a late reply is dropped.
+        _pending.remove(id);
+        throw RequestTimeoutError(method, timeout);
+      });
+    }
     _trackSession(method, params, result);
     return result;
   }

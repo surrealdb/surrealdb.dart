@@ -1,3 +1,4 @@
+import '../errors.dart';
 import '../protocol/codec.dart';
 import 'auth.dart';
 
@@ -65,6 +66,7 @@ class ConnectOptions {
     this.reconnect = const ReconnectOptions(),
     this.versionCheck = true,
     this.timeout = const Duration(seconds: 30),
+    this.requestTimeout = const Duration(seconds: 30),
     this.format = SurrealFormat.cbor,
     this.codec,
   });
@@ -89,6 +91,10 @@ class ConnectOptions {
 
   /// How long to wait for the connection to be established.
   final Duration timeout;
+
+  /// How long to wait for the reply to a single request before failing it
+  /// with a [RequestTimeoutError]. Null waits indefinitely.
+  final Duration? requestTimeout;
 
   /// The serialization format. Defaults to CBOR, which carries the SurrealDB
   /// types without loss. Ignored when [codec] is set.

@@ -81,3 +81,16 @@ class HttpConnectionError extends SurrealError {
 
   final int statusCode;
 }
+
+/// Thrown when the server does not reply to a request within the configured
+/// request timeout. The request may still run on the server.
+class RequestTimeoutError extends SurrealError {
+  const RequestTimeoutError(this.method, this.timeout)
+      : super('The "$method" request timed out after $timeout');
+
+  /// The RPC method that timed out.
+  final String method;
+
+  /// The timeout that was exceeded.
+  final Duration timeout;
+}

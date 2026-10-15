@@ -122,10 +122,18 @@ class Surreal {
     switch (uri.scheme) {
       case 'ws':
       case 'wss':
-        return WebSocketEngine(codec, reconnect: options.reconnect);
+        return WebSocketEngine(
+          codec,
+          reconnect: options.reconnect,
+          requestTimeout: options.requestTimeout,
+        );
       case 'http':
       case 'https':
-        return HttpEngine(codec, client: _httpClient!);
+        return HttpEngine(
+          codec,
+          client: _httpClient!,
+          requestTimeout: options.requestTimeout,
+        );
       default:
         throw UnsupportedEngineError(uri.scheme);
     }
