@@ -369,5 +369,5 @@ class _SurqlReader {
   static final _integer = RegExp(r'-?\d+');
   static final _number = RegExp(r'(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(dec|f)?');
   static final _duration =
-      RegExp(r'(?:\d+(?:ns|µs|us|ms|s|m|h|d|w))+(?![A-Za-z0-9_])');
+      RegExp(r'(?:\d+(?:ns|µs|us|ms|s|m|h|d|w|y))+(?![A-Za-z0-9_])');
 }
