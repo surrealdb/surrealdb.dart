@@ -173,7 +173,7 @@ class HttpEngine implements Engine {
           });
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // Prefer the server's own error, when the body carries one.
-      final error = _tryDecodeError(response.bodyBytes);
+      final error = _tryDecodeError(response.bodyBytes, id);
       if (error != null) throw error;
       throw HttpConnectionError(
         'Request failed with status ${response.statusCode}',
@@ -185,9 +185,13 @@ class HttpEngine implements Engine {
     return decoded.result;
   }
 
-  ResponseError? _tryDecodeError(List<int> body) {
+  /// The error in [body] when it is SurrealDB's reply to request [id]. A
+  /// body from anything else, such as a proxy in front of the server, is
+  /// left to the HTTP status.
+  ResponseError? _tryDecodeError(List<int> body, String id) {
     try {
-      return _protocol.decodeResponse(body).error;
+      final response = _protocol.decodeResponse(body);
+      return response.id == id ? response.error : null;
     } catch (_) {
       return null;
     }
