@@ -197,8 +197,8 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     final credentials = options.authentication;
     if (credentials != null) {
       // Without a refresh token, renewal signs in again with these.
-      _renewal.credentials = credentials;
-      await _rpc('signin', [credentials.toJson()]);
+      final params = _renewal.credentials = _copyOf(credentials.toJson());
+      await _rpc('signin', [params]);
     } else if (options.token != null) {
       await authenticate(options.token!, refreshToken: options.refreshToken);
     }
@@ -376,7 +376,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   Future<SurrealSession> _attachSession(
-      {SessionState? copyOf, AnyAuth? credentials}) async {
+      {SessionState? copyOf, Map<String, Object?>? credentials}) async {
     final engine = _requireSessions('sessions');
     final id = Uuid.v4();
     final state = SessionState();
@@ -420,7 +420,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     final credentials = renewal?.credentials;
     if (!_renewTokens || renewal == null || credentials == null) return;
     try {
-      await call('signin', [credentials.toJson()]);
+      await call('signin', [credentials]);
     } on ResponseError catch (error) {
       // Credentials that no longer work stay rejected; anything else fails
       // the attempt, which is tried again.
@@ -435,6 +435,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     if (!engine.supportsSessions) throw UnsupportedFeatureError(feature);
     return engine;
   }
+
+  /// A deep copy of [value], made by encoding and decoding it.
+  static Map<String, Object?> _copyOf(Map<String, Object?> value) =>
+      (const CborCodec().decode(const CborCodec().encode(value)) as Map)
+          .cast<String, Object?>();
 
   /// Reschedules renewal and tells listeners whenever the tokens change.
   void _onTokensChanged() {

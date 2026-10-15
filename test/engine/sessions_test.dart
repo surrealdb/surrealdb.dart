@@ -35,6 +35,14 @@ void main() {
   FakeRequest last(String method) =>
       server.requests.lastWhere((r) => r.method == method);
 
+  /// Sends the reply to a request whose reply was held back.
+  void reply(FakeRequest request,
+          {Object? result, Map<String, Object?>? error}) =>
+      request.socket.add(const CborCodec().encode({
+        'id': request.id,
+        if (error != null) 'error': error else 'result': result,
+      }));
+
   group('sessions', () {
     test('a new session is attached and its calls carry its id', () async {
       final session = await db.newSession();
@@ -293,6 +301,136 @@ void main() {
       await server.dropAll();
       await eventually(() => server.requests
           .any((r) => r.method == 'attach' && r.raw['session'] == session.id));
+    });
+
+    test('a session whose detach times out is cleaned up', () async {
+      final timed = Surreal();
+      addTearDown(timed.close);
+      await timed.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            requestTimeout: Duration(milliseconds: 300),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      final session = await timed.newSession();
+      final live = await session.live('person');
+      final before = server.accepted;
+      server.handler = (r) => r.method == 'detach'
+          ? const FakeSilence()
+          : FakeSurrealServer.defaultReply(r);
+      await session.close();
+      expect(session.isClosed, isTrue);
+      await live.stream.toList();
+      await eventually(() =>
+          server.accepted == before + 1 &&
+          timed.status == ConnectionStatus.connected);
+      expect(
+          server.requests.where(
+              (r) => r.method == 'attach' && r.raw['session'] == session.id),
+          hasLength(1));
+    });
+
+    test('a session closed while a later one is restored is detached',
+        () async {
+      final first = await db.newSession();
+      final second = await db.newSession();
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'attach' &&
+            r.raw['session'] == second.id &&
+            server.accepted == 2 &&
+            held == null) {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      await server.dropAll();
+      await eventually(() => held != null);
+
+      await first.close();
+      reply(held!);
+      await eventually(() => db.status == ConnectionStatus.connected);
+      expect(
+          server.requests.any((r) =>
+              r.method == 'detach' &&
+              r.raw['session'] == first.id &&
+              identical(r.socket, held!.socket)),
+          isTrue);
+    });
+
+    test('a live query that starts as its session closes is not kept',
+        () async {
+      final session = await db.newSession();
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'live') {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final starting = session.live('person');
+      await eventually(() => held != null);
+      await session.close();
+      reply(held!, result: Uuid('0192e3c4-0000-7000-8000-0000000000aa'));
+      await expectLater(starting, throwsA(isA<InvalidSessionError>()));
+    });
+
+    test('a transaction begun as its session resets or closes fails', () async {
+      final session = await db.newSession();
+      final held = <FakeRequest>[];
+      server.handler = (r) {
+        if (r.method == 'begin') {
+          held.add(r);
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final reset = db.beginTransaction();
+      final closed = session.beginTransaction();
+      await eventually(() => held.length == 2);
+      await db.reset();
+      await session.close();
+      for (final request in held) {
+        reply(request, result: txnId);
+      }
+      await expectLater(reset, throwsA(isA<TransactionClosedError>()));
+      await expectLater(closed, throwsA(isA<InvalidSessionError>()));
+    });
+
+    test('a call that completes while detach is refused keeps its effect',
+        () async {
+      final session = await db.newSession();
+      final held = <String, FakeRequest>{};
+      server.handler = (r) {
+        if (r.method == 'let' || r.method == 'detach') {
+          held[r.method] = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final setting = session.set('x', 1);
+      final closing = session.close();
+      await eventually(() => held.length == 2);
+      reply(held['let']!);
+      await setting;
+      reply(held['detach']!, error: {
+        'code': -32000,
+        'message': 'There was a problem with the datastore',
+        'kind': 'Internal',
+      });
+      await expectLater(closing, throwsA(isA<ServerError>()));
+      server.handler = FakeSurrealServer.defaultReply;
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() => server.requests
+          .any((r) => r.method == 'let' && r.raw['session'] == session.id));
+      expect(last('let').params, ['x', 1]);
     });
 
     test('a timed out begin starts again on a new socket', () async {
