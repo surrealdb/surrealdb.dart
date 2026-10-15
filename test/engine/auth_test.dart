@@ -1,6 +1,7 @@
 @TestOn('vm')
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:surrealdb/src/internal/jwt.dart';
@@ -641,6 +642,46 @@ void main() {
       expect(db.database, 'other');
       final replayed = server.requests.where((r) => r.method == 'use').last;
       expect(replayed.params, ['ns', 'other']);
+    });
+
+    test('a renewal does not start while the last one is selecting again',
+        () async {
+      var signins = 0;
+      var replied = false;
+      bool? overlapped;
+      server.handler = (r) {
+        if (r.method == 'signin') {
+          signins++;
+          if (signins == 3) overlapped = !replied;
+          return FakeResult(fakeJwt(
+              switch (signins) {
+                1 => const Duration(seconds: 1),
+                2 => const Duration(milliseconds: 400),
+                _ => const Duration(hours: 1),
+              },
+              id: '$signins',
+              claims: {'NS': 'ns', 'DB': 'db'}));
+        }
+        if (r.method == 'use' && signins == 2) {
+          // The selection is made again slowly, past the next renewal.
+          Timer(const Duration(milliseconds: 600), () {
+            replied = true;
+            r.socket
+                .add(const CborCodec().encode({'id': r.id, 'result': null}));
+          });
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: DatabaseAuth(
+                namespace: 'ns', database: 'db', username: 'u', password: 'p'),
+          ));
+      await db.use(database: 'other');
+      await eventually(() => signins >= 3, timeout: const Duration(seconds: 4));
+      expect(overlapped, isFalse);
     });
 
     test('a selection lost as the client closes is not kept', () async {
