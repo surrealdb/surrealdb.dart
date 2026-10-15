@@ -19,6 +19,7 @@ import 'types/patch.dart';
 import 'types/query_frame.dart';
 import 'value/value.dart';
 
+part 'api.dart';
 part 'queryable.dart';
 part 'renewal.dart';
 part 'session.dart';

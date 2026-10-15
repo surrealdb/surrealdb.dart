@@ -12,7 +12,9 @@ export 'src/live_query.dart' show LiveQuery;
 export 'src/protocol/codec.dart' show SurrealCodec, SurrealFormat;
 export 'src/surreal.dart'
     show
+        ApiResponse,
         Surreal,
+        SurrealApi,
         SurrealQueryable,
         SurrealSession,
         SurrealSessionMethods,

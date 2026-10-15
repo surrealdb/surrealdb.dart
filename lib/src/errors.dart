@@ -593,3 +593,15 @@ class TransactionClosedError extends SurrealError {
   const TransactionClosedError()
       : super('The transaction has already been committed or cancelled');
 }
+
+/// Thrown by `ApiResponse.value` when an API call did not succeed.
+class UnsuccessfulApiError extends SurrealError {
+  UnsuccessfulApiError(this.status, this.body)
+      : super('The API call failed with status $status');
+
+  /// The HTTP status the API returned.
+  final int status;
+
+  /// The body the API returned.
+  final Object? body;
+}
