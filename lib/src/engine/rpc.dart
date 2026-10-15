@@ -88,8 +88,14 @@ class RpcProtocol {
     final queryId = _asUuid(result['id']);
     if (queryId == null) return null;
     final value = result['result'];
+    // The server sends the record id as `record`. In diff mode the result is
+    // a list of patches with no `id`, so `record` is the only place it is.
+    // Older servers only had it inside the result.
     RecordId? recordId;
-    if (value is Map && value['id'] is RecordId) {
+    final record = result['record'];
+    if (record is RecordId) {
+      recordId = record;
+    } else if (value is Map && value['id'] is RecordId) {
       recordId = value['id'] as RecordId;
     }
     return LiveMessage(

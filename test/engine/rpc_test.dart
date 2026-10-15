@@ -60,4 +60,20 @@ void main() {
     expect(incoming, isA<RpcResponse>());
     expect((incoming! as RpcResponse).result, true);
   });
+
+  test('reads the record id of a diff notification from record', () {
+    final bytes = codec.encode({
+      'result': {
+        'id': Uuid('01234567-89ab-4def-8123-456789abcdef'),
+        'action': 'UPDATE',
+        'record': const RecordId('person', 'tobie'),
+        'result': [
+          {'op': 'replace', 'path': '/age', 'value': 33},
+        ],
+      },
+    });
+    final incoming = protocol.decodeIncoming(bytes) as RpcNotification;
+    expect(incoming.message.recordId, const RecordId('person', 'tobie'));
+    expect(incoming.message.value, isA<List<Object?>>());
+  });
 }
