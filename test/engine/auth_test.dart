@@ -485,5 +485,49 @@ void main() {
       await eventually(() =>
           server.accepted == 2 && db.status == ConnectionStatus.connected);
     });
+
+    test('a renewal rejected by a server before 3.0 is not retried', () async {
+      var signins = 0;
+      server.handler = (r) => switch (r.method) {
+            'signin' when signins++ == 0 =>
+              FakeResult(fakeJwt(const Duration(seconds: 1))),
+            'signin' => const FakeError(
+                'There was a problem with the database: There was a problem '
+                'with authentication'),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+          ));
+      await eventually(() => db.tokens == null,
+          timeout: const Duration(seconds: 3));
+      expect(signins, 2);
+    });
+
+    test('refreshing another token pair forgets the connect credentials',
+        () async {
+      var refreshes = 0;
+      server.handler = (r) => switch (r.method) {
+            'signin' => FakeResult(fakeJwt(const Duration(hours: 1))),
+            'refresh' when refreshes++ == 0 => FakeResult({
+                'access': fakeJwt(const Duration(seconds: 1), id: 'b'),
+                'refresh': 'refresh-b',
+              }),
+            'refresh' => const FakeError('The refresh token is not valid',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+          ));
+      await db.refresh(const Tokens(access: 'a-of-b', refresh: 'r-of-b'));
+      await eventually(() => db.tokens == null,
+          timeout: const Duration(seconds: 3));
+      expect(server.methods.where((m) => m == 'signin'), hasLength(1));
+    });
   });
 }

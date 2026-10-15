@@ -238,6 +238,9 @@ class WebSocketEngine implements Engine {
     'refresh',
     'attach',
     'detach',
+    'begin',
+    'commit',
+    'cancel',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -392,6 +395,9 @@ class WebSocketEngine implements Engine {
     }
     if (!known && (namespace is String || database is String)) {
       await _useKeeping(namespace, database, session);
+    } else if (namespace == null && token != null) {
+      // Cleared, but authenticating may have selected them again.
+      await _call('use', [null, null], session: session);
     }
   }
 

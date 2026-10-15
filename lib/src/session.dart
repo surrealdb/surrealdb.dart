@@ -143,7 +143,9 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// `WITH REFRESH`.
   Future<Tokens> refresh([Tokens? tokens]) =>
       _changingAuth(() => _refresh(tokens ?? this.tokens),
-          keepCredentials: true);
+          // Another pair replaces the session with its own, which the
+          // credentials do not sign in to.
+          keepCredentials: tokens == null || tokens == this.tokens);
 
   Future<Tokens> _refresh(Tokens? tokens) async {
     if (tokens?.refresh == null) {
@@ -339,16 +341,23 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
-    _renewal.stop();
     _client._attached.remove(id);
     _client._engine?.untrackSession(id);
-    await _client._disposeLiveQueries(id);
     try {
       await _client._rpc('detach', const [], session: id);
     } on ConnectionUnavailableError {
       // The connection is down. Its sessions went with it, and this one is
       // no longer tracked, so it is not attached again.
+    } on ResponseError {
+      // The server refused, so the session is still attached: keep it, so
+      // that it can be closed again and is attached again on a reconnect.
+      _closed = false;
+      _client._attached[id] = this;
+      _client._engine?.trackSession(id, _state);
+      rethrow;
     }
+    _renewal.stop();
+    await _client._disposeLiveQueries(id);
   }
 
   @override

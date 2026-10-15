@@ -280,6 +280,44 @@ void main() {
           timed.status == ConnectionStatus.connected);
     });
 
+    test('a session whose detach is refused stays open', () async {
+      final session = await db.newSession();
+      server.handler = (r) => r.method == 'detach'
+          ? const FakeError('There was a problem with the datastore',
+              extra: {'kind': 'Internal'})
+          : FakeSurrealServer.defaultReply(r);
+      await expectLater(session.close(), throwsA(isA<ServerError>()));
+      expect(session.isClosed, isFalse);
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() => server.requests
+          .any((r) => r.method == 'attach' && r.raw['session'] == session.id));
+    });
+
+    test('a timed out begin starts again on a new socket', () async {
+      final timed = Surreal();
+      addTearDown(timed.close);
+      await timed.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            requestTimeout: Duration(milliseconds: 300),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      final before = server.accepted;
+      server.handler = (r) => r.method == 'begin'
+          ? const FakeSilence()
+          : FakeSurrealServer.defaultReply(r);
+      await expectLater(
+          timed.beginTransaction(), throwsA(isA<RequestTimeoutError>()));
+      await eventually(() =>
+          server.accepted == before + 1 &&
+          timed.status == ConnectionStatus.connected);
+    });
+
     test('closing the client closes its sessions', () async {
       final session = await db.newSession();
       await db.close();
