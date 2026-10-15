@@ -195,6 +195,41 @@ void main() {
       expect(server.methods, isNot(contains('refresh')));
     });
 
+    test('a fork whose token is rejected on reconnect signs in again',
+        () async {
+      var issued = 0;
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}'))
+          : FakeSurrealServer.defaultReply(r);
+      final parent = Surreal();
+      addTearDown(parent.close);
+      await parent.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      final fork = await parent.forkSession();
+      server.handler = (r) => switch (r.method) {
+            'authenticate' => const FakeError('The token has expired',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            'signin' =>
+              FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}')),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() => server.requests
+          .any((r) => r.method == 'signin' && r.raw['session'] == fork.id));
+      await eventually(() => parent.status == ConnectionStatus.connected);
+      expect(fork.tokens, isNotNull);
+      expect(parent.tokens, isNotNull);
+    });
+
     test('a kill from another session leaves the query alone', () async {
       final session = await db.newSession();
       final live = await db.live('person');

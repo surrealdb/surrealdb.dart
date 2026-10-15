@@ -1,4 +1,15 @@
+import '../errors.dart';
 import '../value/value.dart';
+
+/// Whether [error] is the server refusing the credentials or tokens it was
+/// given, rather than failing to check them. Servers before 3.0 send no
+/// kind, so their message is read instead.
+bool rejectsAuthentication(Object error) {
+  if (error is NotAllowedError) return true;
+  if (error is! ServerError || error.rawKind != null) return false;
+  final message = error.message.toLowerCase();
+  return message.contains('authentication') || message.contains('token');
+}
 
 /// The state of one server-side session, as the client knows it: the
 /// selected namespace and database, the access token and the variables set
