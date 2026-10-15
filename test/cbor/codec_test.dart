@@ -245,4 +245,36 @@ void main() {
       expect(() => codec.decode([0x82, 0x01]), throwsFormatException);
     });
   });
+
+  group('NONE and NULL', () {
+    test('NONE and NULL round trip as distinct values', () {
+      expect(roundTrip(none), same(none));
+      expect(roundTrip(null), isNull);
+      expect(roundTrip([none, null]), [none, null]);
+      expect(roundTrip({'a': none, 'b': null}), {'a': none, 'b': null});
+    });
+
+    test('NONE is tag 6 on null and NULL is a plain null', () {
+      expect(codec.encode(none), [0xc6, 0xf6]);
+      expect(codec.encode(null), [0xf6]);
+      expect(codec.decode([0xc6, 0xf6]), same(none));
+      expect(codec.decode([0xf6]), isNull);
+    });
+  });
+
+  group('Set', () {
+    test('a Set is tag 56 on an array', () {
+      expect(codec.encode(<int>{1}), [0xd8, 56, 0x81, 0x01]);
+    });
+
+    test('round trips as a Set', () {
+      final decoded = roundTrip(<Object?>{3, 'a', const RecordId('t', 1)});
+      expect(decoded, isA<Set<Object?>>());
+      expect(decoded, <Object?>{3, 'a', const RecordId('t', 1)});
+    });
+
+    test('a List stays a List', () {
+      expect(roundTrip([1, 1]), isA<List<Object?>>());
+    });
+  });
 }

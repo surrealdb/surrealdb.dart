@@ -15,7 +15,12 @@ import 'tags.dart';
 /// matching [SurrealValue]. This is the default codec, since CBOR carries the
 /// SurrealDB types without loss.
 class CborCodec implements SurrealCodec {
-  const CborCodec();
+  const CborCodec({this.setsAsArrays = false});
+
+  /// Whether Dart sets are encoded as plain arrays rather than as SurrealDB
+  /// sets. Servers before 3.0 have no set type and reject the set tag, so
+  /// the client turns this on when it connects to one.
+  final bool setsAsArrays;
 
   @override
   String get name => 'cbor';
@@ -66,6 +71,13 @@ class CborCodec implements SurrealCodec {
           for (final entry in value.entries)
             _toCbor(entry.key): _toCbor(entry.value),
         });
+      case Set() when setsAsArrays:
+        return CborList([for (final item in value) _toCbor(item)]);
+      case Set():
+        return CborList(
+          [for (final item in value) _toCbor(item)],
+          tags: const [SurrealCborTags.set],
+        );
       case Iterable():
         return CborList([for (final item in value) _toCbor(item)]);
     }
@@ -113,6 +125,8 @@ class CborCodec implements SurrealCodec {
         );
       case Geometry():
         return _geometryToCbor(value);
+      case SurrealNone():
+        return const CborNull(tags: [SurrealCborTags.none]);
     }
   }
 
@@ -207,7 +221,7 @@ class CborCodec implements SurrealCodec {
   Object? _applyTag(int tag, Object? value) {
     switch (tag) {
       case SurrealCborTags.none:
-        return null;
+        return none;
       case SurrealCborTags.table:
         return Table(value as String);
       case SurrealCborTags.recordId:
@@ -266,7 +280,7 @@ class CborCodec implements SurrealCodec {
         final parts = (value as List).cast<String>();
         return FileRef(parts[0], parts[1]);
       case SurrealCborTags.set:
-        return value;
+        return <Object?>{...value as List};
       case SurrealCborTags.geometryPoint:
         final parts = value as List;
         return GeometryPoint(_toDouble(parts[0]), _toDouble(parts[1]));

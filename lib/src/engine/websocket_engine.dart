@@ -18,12 +18,17 @@ class WebSocketEngine implements Engine {
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
     Duration? requestTimeout = const Duration(seconds: 30),
-  })  : _codec = codec,
-        _protocol = RpcProtocol(codec),
+  })  : _protocol = RpcProtocol(codec),
         _reconnect = reconnect,
         _requestTimeout = requestTimeout;
 
-  final SurrealCodec _codec;
+  SurrealCodec get _codec => _protocol.codec;
+
+  @override
+  SurrealCodec get codec => _protocol.codec;
+
+  @override
+  set codec(SurrealCodec value) => _protocol.codec = value;
   final RpcProtocol _protocol;
   final ReconnectOptions _reconnect;
   final Duration? _requestTimeout;

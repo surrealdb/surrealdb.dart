@@ -1,6 +1,8 @@
 @TestOn('vm')
 library;
 
+import 'dart:typed_data';
+
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -95,6 +97,23 @@ void main() {
       await db.close();
     });
 
+    for (final (version, tagged) in [
+      ('surrealdb-2.3.0', false),
+      ('surrealdb-3.0.0', true),
+    ]) {
+      test('a set is ${tagged ? 'a set' : 'an array'} for $version', () async {
+        server.handler = versionIs(version);
+        final db = Surreal();
+        await db.connect(server.url);
+        await db.query(r'RETURN $s', bindings: {
+          's': {1, 2},
+        });
+        final sent = (server.requests.last.params[1] as Map)['s'];
+        expect(sent, tagged ? isA<Set<Object?>>() : isA<List<Object?>>());
+        await db.close();
+      });
+    }
+
     test('a reconnect to an unsupported server closes the client', () async {
       server.handler = versionIs('surrealdb-3.3.4');
       final db = Surreal();
@@ -116,6 +135,91 @@ void main() {
       await eventually(() => db.status == ConnectionStatus.disconnected);
       await eventually(() => server.openConnections == 0);
       expect(server.methods.where((m) => m == 'live'), hasLength(1));
+    });
+
+    test('a set is an array when the version is not checked', () async {
+      final db = Surreal();
+      await db.connect(server.url,
+          options: const ConnectOptions(versionCheck: false));
+      await db.query(r'RETURN $s', bindings: {
+        's': {1, 2},
+      });
+      expect(
+          (server.requests.last.params[1] as Map)['s'], isA<List<Object?>>());
+      await db.close();
+    });
+
+    test('a set is replayed as an array to a server moved back to 2.x',
+        () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      addTearDown(db.close);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      await db.set('s', {1, 2});
+      expect(server.requests.last.params[1], isA<Set<Object?>>());
+
+      server.handler = versionIs('surrealdb-2.3.0');
+      server.requests.clear();
+      await server.dropAll();
+      await eventually(() => server.methods.contains('let'));
+      expect(server.methods.first, 'version');
+      expect(server.requests.last.params[1], isA<List<Object?>>());
+    });
+
+    test('a set sent as soon as the client is connected is an array', () async {
+      final db = Surreal();
+      addTearDown(db.close);
+      Future<void>? sent;
+      db.statusChanges.listen((status) {
+        if (status == ConnectionStatus.connected) {
+          sent ??= db.query(r'RETURN $s', bindings: {
+            's': {1, 2},
+          });
+        }
+      });
+      await db.connect(server.url,
+          options: const ConnectOptions(versionCheck: false));
+      await eventually(() => sent != null);
+      await sent;
+      expect(
+          (server.requests.last.params[1] as Map)['s'], isA<List<Object?>>());
+    });
+
+    test('an unchecked reconnect sends sets as arrays again', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      addTearDown(db.close);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              versionCheck: false,
+              reconnect: ReconnectOptions(
+                retryDelay: Duration(milliseconds: 10),
+                retryDelayMax: Duration(milliseconds: 10),
+              )));
+      await db.version();
+      await db.set('s', {1, 2});
+      expect(server.requests.last.params[1], isA<Set<Object?>>());
+
+      server.requests.clear();
+      await server.dropAll();
+      await eventually(() => server.methods.contains('let'));
+      expect(server.requests.last.params[1], isA<List<Object?>>());
+    });
+
+    test('a codec the caller gave is kept', () async {
+      server.handler = versionIs('surrealdb-2.3.0');
+      final codec = _CountingCodec();
+      final db = Surreal();
+      await db.connect(server.url, options: ConnectOptions(codec: codec));
+      final before = codec.encoded;
+      await db.query('RETURN 1');
+      expect(codec.encoded, greaterThan(before));
+      await db.close();
     });
 
     test('an unsupported server is never reported as connected', () async {
@@ -175,4 +279,14 @@ void main() {
       await db.close();
     });
   });
+}
+
+class _CountingCodec extends CborCodec {
+  var encoded = 0;
+
+  @override
+  Uint8List encode(Object? value) {
+    encoded++;
+    return super.encode(value);
+  }
 }

@@ -13,6 +13,7 @@ part 'datetime.dart';
 part 'future.dart';
 part 'file_ref.dart';
 part 'geometry.dart';
+part 'none.dart';
 
 /// Base type for every value that has a dedicated SurrealDB representation on
 /// the wire. These types round trip through the CBOR codec without loss.

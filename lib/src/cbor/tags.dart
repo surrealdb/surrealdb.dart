@@ -62,7 +62,8 @@ class SurrealCborTags {
   /// File pointer, encoded as `[bucket, key]`.
   static const int file = 55;
 
-  /// Set, encoded as an array.
+  /// Set, encoded as an array. A Dart [Set] is sent with this tag and the tag
+  /// decodes to a [Set].
   static const int set = 56;
 
   static const int geometryPoint = 88;

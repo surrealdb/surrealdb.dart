@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
 import 'engine/websocket_engine.dart';
@@ -56,6 +57,10 @@ class Surreal {
   String? _accessToken;
   String? _version;
   var _versionCheck = true;
+
+  /// Whether the codec is the built-in one for the format, rather than one
+  /// the caller supplied.
+  var _ownCodec = true;
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
   StreamSubscription<LiveMessage>? _liveSubscription;
@@ -117,6 +122,9 @@ class Surreal {
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
+    _ownCodec = options.codec == null;
+    // Until the version is known, sets go as arrays, which every server takes.
+    _adaptCodec();
     // The server is checked before anyone is told the connection is open.
     _verifying = options.versionCheck;
     try {
@@ -201,7 +209,24 @@ class Surreal {
   Future<String> version() async {
     final version = _versionOf(await _rpc('version'));
     _version = version;
+    _adaptCodec();
     return version ?? '';
+  }
+
+  /// Encodes sets as SurrealDB sets only for a server known to be 3.0 or
+  /// later. Older servers have no set type and reject its CBOR tag, so sets
+  /// go to them, and to a server whose version is not known, as arrays. A
+  /// codec given in [ConnectOptions.codec] is left as it is.
+  void _adaptCodec() {
+    final engine = _engine;
+    if (engine == null || !_ownCodec) return;
+    final codec = engine.codec;
+    if (codec is! CborCodec) return;
+    final major = _parseVersion(_version ?? '')?.first;
+    final arrays = major == null || major < 3;
+    if (codec.setsAsArrays != arrays) {
+      engine.codec = CborCodec(setsAsArrays: arrays);
+    }
   }
 
   static String? _versionOf(Object? result) =>
@@ -238,9 +263,17 @@ class Surreal {
   Future<void> _verifyServer(
       Future<Object?> Function(String method, List<Object?> params)
           call) async {
-    if (!_versionCheck) return;
+    if (!_versionCheck) {
+      // The server may have changed, and its version is not checked, so
+      // forget the old one and send sets as arrays again.
+      _version = null;
+      _adaptCodec();
+      return;
+    }
     final version = _versionOf(await call('version', const [])) ?? '';
     _version = version;
+    // The session about to be replayed may hold sets.
+    _adaptCodec();
     if (isSupportedServerVersion(version)) return;
     final error = UnsupportedVersionError(
         version, minimumServerVersion, maximumServerVersion);
@@ -403,7 +436,8 @@ class Surreal {
         if (data != null) data,
       ]);
 
-  /// Runs a built in or user defined function and returns its result.
+  /// Runs a built in or user defined function and returns its result. A
+  /// function that returns NONE gives [none], not null.
   Future<dynamic> run(String name, {String? version, List<Object?>? args}) =>
       _rpc('run', [name, version, args ?? const []]);
 
@@ -509,10 +543,14 @@ class Surreal {
     return client;
   }
 
-  Future<Object?> _rpc(String method, [List<Object?> params = const []]) {
+  /// Sends an RPC call. A result of NONE, which methods that return nothing
+  /// give, comes back as null, except from `run`, where it is the
+  /// function's own result.
+  Future<Object?> _rpc(String method, [List<Object?> params = const []]) async {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
-    return engine.rpc(method, params);
+    final result = await engine.rpc(method, params);
+    return result is SurrealNone && method != 'run' ? null : result;
   }
 
   SurrealValue _thing(Object resource) {

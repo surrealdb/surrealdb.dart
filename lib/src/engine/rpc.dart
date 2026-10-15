@@ -36,7 +36,9 @@ final class RpcNotification extends RpcIncoming {
 class RpcProtocol {
   RpcProtocol(this.codec);
 
-  final SurrealCodec codec;
+  /// The codec requests and replies are encoded with. It can be replaced by
+  /// one of the same format once the server version is known.
+  SurrealCodec codec;
   var _counter = 0;
 
   /// A fresh request id.
@@ -59,7 +61,8 @@ class RpcProtocol {
   RpcIncoming? decodeIncoming(List<int> bytes) {
     final decoded = codec.decode(bytes);
     if (decoded is! Map) return null;
-    if (decoded['id'] != null) return _responseFrom(decoded);
+    final id = decoded['id'];
+    if (id != null && id is! SurrealNone) return _responseFrom(decoded);
     final result = decoded['result'];
     if (result is Map && result['action'] != null) {
       final message = _liveMessage(result);
@@ -231,7 +234,7 @@ class _SurqlReader {
       case 'NULL':
         return null;
       case 'NONE':
-        return null;
+        return none;
     }
     // A record id, such as `other:x`.
     _i = start;
