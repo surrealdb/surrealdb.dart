@@ -493,7 +493,9 @@ class Surreal {
   /// `WITH REFRESH`.
   Future<Tokens> refresh([Tokens? tokens]) =>
       _changingAuth(() => _refresh(tokens ?? this.tokens),
-          keepCredentials: true);
+          // Another pair replaces the session with its own, which the
+          // credentials do not sign in to.
+          keepCredentials: tokens == null || tokens == this.tokens);
 
   Future<Tokens> _refresh(Tokens? tokens) async {
     if (tokens?.refresh == null) {
@@ -565,7 +567,7 @@ class Surreal {
         _authController.addError(error, stackTrace);
       }
       if (_session.token != token) return;
-      if (error is NotAllowedError) {
+      if (rejectsAuthentication(error)) {
         // The refresh token or credentials were rejected, so retrying will
         // not help. The session keeps its access token until it expires,
         // and is signed out then.
