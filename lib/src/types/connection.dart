@@ -86,7 +86,9 @@ class ConnectOptions {
   /// How to behave when the connection drops.
   final ReconnectOptions reconnect;
 
-  /// Whether to check the server version after connecting.
+  /// Whether to check the server version straight after connecting. An
+  /// unsupported version closes the connection and fails `connect` with
+  /// an `UnsupportedVersionError`.
   final bool versionCheck;
 
   /// How long to wait for the connection to be established.

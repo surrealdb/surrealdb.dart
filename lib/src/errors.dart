@@ -68,11 +68,18 @@ class UnsupportedFeatureError extends SurrealError {
 
 /// Thrown when the server version is outside the range this client supports.
 class UnsupportedVersionError extends SurrealError {
-  const UnsupportedVersionError(this.version, this.minimum)
-      : super('Unsupported server version $version, the minimum is $minimum');
+  const UnsupportedVersionError(this.version, this.minimum, this.maximum)
+      : super('Unsupported server version $version, this client supports '
+            '$minimum up to but not including $maximum');
 
+  /// The version the server reported.
   final String version;
+
+  /// The lowest supported version.
   final String minimum;
+
+  /// The first version that is no longer supported.
+  final String maximum;
 }
 
 /// Thrown when the HTTP engine receives a non success status code.
