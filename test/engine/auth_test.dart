@@ -433,6 +433,60 @@ void main() {
           timeout: const Duration(seconds: 3));
     });
 
+    test('a session whose refresh token is revoked is signed out at expiry',
+        () async {
+      server.handler = (r) => r.method == 'signin'
+          ? issueTokens(r, const Duration(seconds: 1))
+          : FakeSurrealServer.defaultReply(r);
+      await connect(margin: const Duration(milliseconds: 100));
+      await db.signin(const RootAuth(username: 'u', password: 'p'));
+      await db.revoke();
+      expect(db.tokens?.refresh, isNull);
+      await eventually(() => db.tokens == null,
+          timeout: const Duration(seconds: 3));
+      expect(server.methods, isNot(contains('refresh')));
+    });
+
+    test('a failed call keeps the sign-out at expiry', () async {
+      server.handler = (r) => switch (r.method) {
+            'signin' => issueTokens(r, const Duration(seconds: 2)),
+            'refresh' => const FakeError('The refresh token is not valid',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await connect();
+      await db.signin(const RootAuth(username: 'u', password: 'p'));
+      // Renewal is rejected halfway through, which leaves only the sign-out.
+      await eventually(() => db.tokens != null && db.tokens!.refresh == null);
+      await expectLater(db.refresh(), throwsA(isA<AuthenticationError>()));
+      await eventually(() => db.tokens == null,
+          timeout: const Duration(seconds: 3));
+    });
+
+    test('a renewal that gives the same token back is tried again', () async {
+      final token = fakeJwt(const Duration(seconds: 2));
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(token)
+          : FakeSurrealServer.defaultReply(r);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+            tokenExpiryMargin: Duration(milliseconds: 500),
+          ));
+      await eventually(
+          () => server.methods.where((m) => m == 'signin').length >= 2,
+          timeout: const Duration(seconds: 3));
+      // The retry backs off for 5 seconds, so it comes after the token has
+      // expired, and the server has a fresh one by then.
+      final fresh = fakeJwt(const Duration(hours: 1));
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fresh)
+          : FakeSurrealServer.defaultReply(r);
+      await eventually(() => db.tokens?.access == fresh,
+          timeout: const Duration(seconds: 8));
+    }, timeout: const Timeout(Duration(seconds: 20)));
+
     test('a reconnect keeps the tokens until signing in again works', () async {
       server.handler = (r) => r.method == 'signin'
           ? FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}'))

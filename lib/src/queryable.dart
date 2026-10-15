@@ -101,12 +101,23 @@ mixin SurrealQueryable {
   /// }
   /// ```
   Stream<QueryFrame> queryStream(String query,
-      {Map<String, Object?>? bindings}) async* {
+          {Map<String, Object?>? bindings}) =>
+      _streamQuery(query, bindings, call: _call, callStream: _callStream);
+
+  /// Runs [queryStream] with [call] and [callStream] in place of [_call] and
+  /// [_callStream].
+  Stream<QueryFrame> _streamQuery(
+    String query,
+    Map<String, Object?>? bindings, {
+    required Future<Object?> Function(String method, List<Object?> params) call,
+    required Stream<Object?> Function(String method, List<Object?> params)
+        callStream,
+  }) async* {
     final params = [query, bindings ?? const <String, Object?>{}];
     if (_client._canStream) {
       var started = false;
       try {
-        await for (final raw in _callStream('query_stream', params)) {
+        await for (final raw in callStream('query_stream', params)) {
           started = true;
           final frame = _frameFrom(raw);
           if (frame != null) yield frame;
@@ -122,7 +133,8 @@ mixin SurrealQueryable {
         _client._streamingUnsupported = true;
       }
     }
-    final statements = await queryRaw(query, bindings: bindings);
+    final result = await call('query', params);
+    final statements = (result as List).cast<Map<String, dynamic>>();
     for (final (index, statement) in statements.indexed) {
       final time = statement['time']?.toString();
       final type = statement['type'];
