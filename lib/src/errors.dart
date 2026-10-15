@@ -239,9 +239,9 @@ class ServerError extends ResponseError {
         statement['kind'] is String ? statement['kind'] as String : null;
     return ServerError.of(
       statement['result']?.toString() ?? 'Query statement failed',
-      // Servers before 3.0 send no kind. Their statement errors are most
-      // often raised by the query itself.
-      kind: rawKind != null ? ErrorKind.parse(rawKind) : ErrorKind.thrown,
+      // Servers before 3.0 send no kind, so nothing says what went wrong.
+      // Thrown is only for THROW statements.
+      kind: rawKind != null ? ErrorKind.parse(rawKind) : ErrorKind.internal,
       rawKind: rawKind,
       code: 0,
       details: ErrorDetail.fromWire(statement['details']),
