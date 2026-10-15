@@ -502,11 +502,13 @@ class WebSocketEngine implements Engine {
         if (state.token == rejected) state.setTokens(null, null);
       }
     }
-    if (!known && (namespace is String || database is String)) {
-      await _useKeeping(namespace, database, session);
-    } else if (namespace == null && token != null) {
+    if (!known) {
+      if (namespace is! SurrealNone || database is! SurrealNone) {
+        await _useKeeping(namespace, database, session);
+      }
+    } else if (token != null && (namespace == null || database == null)) {
       // Cleared, but authenticating may have selected them again.
-      await _call('use', [null, null], session: session);
+      await _call('use', [namespace, database], session: session);
     }
   }
 
