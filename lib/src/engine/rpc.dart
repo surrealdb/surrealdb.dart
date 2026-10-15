@@ -106,17 +106,3 @@ class RpcProtocol {
     return null;
   }
 }
-
-/// A copy of [value] that later changes to the caller's maps, lists, sets
-/// and byte buffers do not reach, so a value kept to send again later is the
-/// value that was sent.
-Object? snapshotValue(Object? value) => switch (value) {
-      Uint8List() => Uint8List.fromList(value),
-      Map() => <Object?, Object?>{
-          for (final MapEntry(:key, :value) in value.entries)
-            snapshotValue(key): snapshotValue(value),
-        },
-      List() => [for (final item in value) snapshotValue(item)],
-      Set() => <Object?>{for (final item in value) snapshotValue(item)},
-      _ => value,
-    };
