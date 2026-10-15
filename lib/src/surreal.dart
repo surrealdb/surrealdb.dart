@@ -55,6 +55,11 @@ class Surreal {
   String? _database;
   String? _accessToken;
   String? _version;
+  var _versionCheck = true;
+
+  /// Whether the codec is the built-in one for the format, rather than one
+  /// the caller supplied.
+  var _ownCodec = true;
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
   StreamSubscription<LiveMessage>? _liveSubscription;
@@ -101,12 +106,15 @@ class Surreal {
     final engine = _engineFor(uri, options);
     _engine = engine;
     _url = uri;
-    engine.onReconnect = _restartLiveQueries;
+    _versionCheck = options.versionCheck;
+    engine.onReconnect = _onReconnect;
     engine.onAuthenticationLost = (_) => _accessToken = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_statusController.add);
 
+    _ownCodec = options.codec == null;
     await engine.open(uri, timeout: options.timeout);
+    _adaptCodec();
 
     if (options.versionCheck) {
       try {
@@ -114,15 +122,6 @@ class Surreal {
       } catch (_) {
         await close();
         rethrow;
-      }
-      // Servers before 3.0 have no set type and reject its CBOR tag.
-      final codec = engine.codec;
-      final major = _parseVersion(_version ?? '')?.first;
-      if (codec is CborCodec &&
-          !codec.setsAsArrays &&
-          major != null &&
-          major < 3) {
-        engine.codec = const CborCodec(setsAsArrays: true);
       }
     }
     if (options.namespace != null || options.database != null) {
@@ -187,7 +186,24 @@ class Surreal {
     final version =
         result is Map ? result['version']?.toString() : result?.toString();
     _version = version;
+    _adaptCodec();
     return version ?? '';
+  }
+
+  /// Encodes sets as SurrealDB sets only for a server known to be 3.0 or
+  /// later. Older servers have no set type and reject its CBOR tag, so sets
+  /// go to them, and to a server whose version is not known, as arrays. A
+  /// codec given in [ConnectOptions.codec] is left as it is.
+  void _adaptCodec() {
+    final engine = _engine;
+    if (engine == null || !_ownCodec) return;
+    final codec = engine.codec;
+    if (codec is! CborCodec) return;
+    final major = _parseVersion(_version ?? '')?.first;
+    final arrays = major == null || major < 3;
+    if (codec.setsAsArrays != arrays) {
+      engine.codec = CborCodec(setsAsArrays: arrays);
+    }
   }
 
   /// Checks that the server is reachable and healthy. Throws on failure.
@@ -398,6 +414,24 @@ class Surreal {
   /// Starts every registered live query again after a reconnect. Each query
   /// is restarted on its own: one that fails keeps its registration, receives
   /// the error on its stream, and is tried again on the next reconnect.
+  /// Runs after the WebSocket engine reconnects. The server behind the URL
+  /// may have changed, so its version is checked again before live queries
+  /// are restarted. An unsupported server closes the client.
+  Future<void> _onReconnect() async {
+    if (_versionCheck) {
+      try {
+        await _checkVersion();
+      } on UnsupportedVersionError catch (error, stackTrace) {
+        for (final registration in List.of(_liveByUuid.values)) {
+          registration.query.emitError(error, stackTrace);
+        }
+        await close();
+        return;
+      }
+    }
+    await _restartLiveQueries();
+  }
+
   Future<void> _restartLiveQueries() async {
     for (final entry in _liveByUuid.entries.toList()) {
       final oldId = entry.key;

@@ -127,12 +127,21 @@ class HttpEngine implements Engine {
       if (_namespace != null) 'Surreal-NS': _namespace!,
       if (_database != null) 'Surreal-DB': _database!,
     };
-    final request = _client.post(_url!, headers: headers, body: body);
+    // Completing this aborts the request, so a timed out request does not
+    // keep its connection open.
+    final abort = Completer<void>();
+    final request =
+        http.AbortableRequest('POST', _url!, abortTrigger: abort.future)
+          ..headers.addAll(headers)
+          ..bodyBytes = body;
+    final sending = _client.send(request).then(http.Response.fromStream);
     final timeout = _requestTimeout;
     final response = timeout == null
-        ? await request
-        : await request.timeout(timeout,
-            onTimeout: () => throw RequestTimeoutError(method, timeout));
+        ? await sending
+        : await sending.timeout(timeout, onTimeout: () {
+            abort.complete();
+            throw RequestTimeoutError(method, timeout);
+          });
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // Prefer the server's own error, when the body carries one.
       final error = _tryDecodeError(response.bodyBytes);
