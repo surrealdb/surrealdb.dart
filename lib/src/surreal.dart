@@ -646,13 +646,14 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   /// Sends an RPC call. A result of NONE, which methods that return nothing
-  /// give, comes back as null.
+  /// give, comes back as null, except from `run`, where it is the
+  /// function's own result.
   Future<Object?> _rpc(String method, List<Object?> params,
       {Uuid? session, Uuid? txn}) async {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
     final result = await engine.rpc(method, params, session: session, txn: txn);
-    return result is SurrealNone ? null : result;
+    return result is SurrealNone && method != 'run' ? null : result;
   }
 
   Stream<Object?> _rpcStream(String method, List<Object?> params,
