@@ -1,6 +1,8 @@
 @TestOn('vm')
 library;
 
+import 'dart:typed_data';
+
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -75,5 +77,28 @@ void main() {
         'nested': {'a': 1},
       },
     ]);
+  });
+
+  test('a variable changed while set() is in flight replays as sent', () async {
+    final value = {'n': 1};
+    final bytes = Uint8List.fromList(List.filled(16, 1));
+    final setting = db.set('kept', value);
+    final settingId = db.set('id', Uuid.fromBytes(bytes));
+    value['n'] = 2;
+    bytes[0] = 9;
+    await setting;
+    await settingId;
+    server.requests.clear();
+
+    await server.dropAll();
+    await eventually(
+        () => db.status == ConnectionStatus.connected && server.accepted == 2);
+
+    final lets = {
+      for (final r in server.requests.where((r) => r.method == 'let'))
+        r.params[0]: r.params[1],
+    };
+    expect(lets['kept'], {'n': 1});
+    expect(lets['id'], Uuid.fromBytes(Uint8List.fromList(List.filled(16, 1))));
   });
 }

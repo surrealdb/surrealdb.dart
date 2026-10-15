@@ -215,6 +215,10 @@ class WebSocketEngine implements Engine {
     _pending[id] = completer;
     final payload =
         _protocol.encodeRequest(id, method, params, session: session, txn: txn);
+    // A variable is kept as it was sent, decoded from the request itself, so
+    // that later changes to the caller's objects cannot change what a
+    // reconnect replays.
+    final sent = method == 'let' ? _paramsOf(payload) : params;
     channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
     final timeout = _requestTimeout;
     final Object? result;
@@ -228,9 +232,12 @@ class WebSocketEngine implements Engine {
       });
     }
     (session == null ? _session : _attached[session])
-        ?.apply(method, params, result);
+        ?.apply(method, sent, result);
     return result;
   }
+
+  List<Object?> _paramsOf(List<int> payload) =>
+      ((_codec.decode(payload) as Map)['params'] as List).cast<Object?>();
 
   void _onMessage(dynamic data) {
     final bytes = data is String ? utf8.encode(data) : (data as List<int>);
@@ -327,8 +334,15 @@ class WebSocketEngine implements Engine {
   Future<void> _restoreSession() async {
     await _restoreState(_session, null);
     for (final MapEntry(key: id, value: state) in _attached.entries.toList()) {
+      // A session closed while earlier ones were replayed is left out.
+      if (!identical(_attached[id], state)) continue;
       await _call('attach', const [], session: id);
       await _restoreState(state, id);
+      // One closed while it was replayed could not send its own detach, as
+      // the connection was not ready, so send it now.
+      if (!identical(_attached[id], state)) {
+        await _call('detach', const [], session: id);
+      }
     }
   }
 

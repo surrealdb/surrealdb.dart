@@ -155,6 +155,43 @@ void main() {
       expect(db.tokens, isNull);
     });
 
+    test('a sign-out holds off a renewal that comes due during it', () async {
+      FakeRequest? held;
+      server.handler = (r) => switch (r.method) {
+            'signin' => issueTokens(r, const Duration(seconds: 2)),
+            'invalidate' => () {
+                held = r;
+                return const FakeSilence();
+              }(),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await connect(margin: const Duration(seconds: 1));
+      await db.signin(const RootAuth(username: 'u', password: 'p'));
+
+      // The renewal is due a second after signing in; sign out before then
+      // and hold the reply past it.
+      final signedOut = db.invalidate();
+      await eventually(() => held != null);
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      expect(server.methods, isNot(contains('refresh')));
+      held!.socket
+          .add(const CborCodec().encode({'id': held!.id, 'result': null}));
+      await signedOut;
+      expect(db.tokens, isNull);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(server.methods, isNot(contains('refresh')));
+    });
+
+    test('authenticate publishes the token pair once', () async {
+      await connect();
+      final changes = <Tokens?>[];
+      db.authChanges.listen(changes.add);
+      final access = fakeJwt(const Duration(hours: 1), id: 'given');
+      await db.authenticate(access, refreshToken: 'refresh-given');
+      await Future<void>.delayed(Duration.zero);
+      expect(changes, [Tokens(access: access, refresh: 'refresh-given')]);
+    });
+
     test('renews by signing in again when there is no refresh token', () async {
       server.handler = (r) => r.method == 'signin'
           ? FakeResult(fakeJwt(const Duration(seconds: 1)))

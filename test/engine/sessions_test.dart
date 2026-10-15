@@ -71,7 +71,9 @@ void main() {
         ],
       );
       expect(server.requests.every((r) => r.raw['session'] == fork.id), isTrue);
-      expect(fork.tokens, const Tokens(access: 'token', refresh: 'refresh'));
+      // The refresh token can be used once, so it stays with the parent.
+      expect(fork.tokens, const Tokens(access: 'token'));
+      expect(db.tokens, const Tokens(access: 'token', refresh: 'refresh'));
       expect(fork.variables, {'x': 1});
 
       // From then on the two are independent.
@@ -145,6 +147,70 @@ void main() {
       await eventually(() => session.tokens?.refresh == 'refresh-2');
       // The default session has no tokens of its own to renew.
       expect(db.tokens, isNull);
+      await session.close();
+    });
+
+    test('a session closed during a reconnect is not left attached', () async {
+      final session = await db.newSession();
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'attach' && server.accepted == 2 && held == null) {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      await server.dropAll();
+      await eventually(() => held != null);
+
+      await session.close();
+      held!.socket
+          .add(const CborCodec().encode({'id': held!.id, 'result': null}));
+      await eventually(() => db.status == ConnectionStatus.connected);
+      await eventually(() => server.requests.any((r) =>
+          r.method == 'detach' &&
+          r.raw['session'] == session.id &&
+          identical(r.socket, held!.socket)));
+    });
+
+    test('a fork renews with its parent\'s credentials, not its refresh token',
+        () async {
+      var issued = 0;
+      server.handler = (r) => switch (r.method) {
+            'signin' => FakeResult(
+                fakeJwt(const Duration(seconds: 2), id: '${++issued}')),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      final parent = Surreal();
+      addTearDown(parent.close);
+      await parent.connect(server.url,
+          options: const ConnectOptions(
+              versionCheck: false,
+              authentication: RootAuth(username: 'u', password: 'p')));
+      final fork = await parent.forkSession();
+      await eventually(
+          () => server.requests
+              .any((r) => r.method == 'signin' && r.raw['session'] == fork.id),
+          timeout: const Duration(seconds: 3));
+      expect(server.methods, isNot(contains('refresh')));
+    });
+
+    test('a kill from another session leaves the query alone', () async {
+      final session = await db.newSession();
+      final live = await db.live('person');
+      await session.kill(live.id);
+      expect(last('kill').raw['session'], session.id);
+
+      final received = live.stream.first;
+      server.push({
+        'result': {
+          'id': live.id,
+          'action': 'CREATE',
+          'result': {'id': const RecordId('person', 1)},
+        },
+      });
+      expect((await received.timeout(const Duration(seconds: 2))).action,
+          LiveAction.create);
       await session.close();
     });
 

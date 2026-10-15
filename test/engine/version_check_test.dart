@@ -1,6 +1,8 @@
 @TestOn('vm')
 library;
 
+import 'dart:typed_data';
+
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -86,6 +88,52 @@ void main() {
       });
     }
 
+    test('a reconnect to an unsupported server closes the client', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      final live = await db.live('person');
+      final error = live.stream
+          .drain<void>()
+          .then<Object?>((_) => null, onError: (Object e) => e);
+
+      server.handler = versionIs('surrealdb-5.0.0');
+      await server.dropAll();
+      expect(await error.timeout(const Duration(seconds: 5)),
+          isA<UnsupportedVersionError>());
+      await eventually(() => db.status == ConnectionStatus.disconnected);
+      await eventually(() => server.openConnections == 0);
+      expect(server.methods.where((m) => m == 'live'), hasLength(1));
+    });
+
+    test('a set is an array when the version is not checked', () async {
+      final db = Surreal();
+      await db.connect(server.url,
+          options: const ConnectOptions(versionCheck: false));
+      await db.query(r'RETURN $s', bindings: {
+        's': {1, 2},
+      });
+      expect(
+          (server.requests.last.params[1] as Map)['s'], isA<List<Object?>>());
+      await db.close();
+    });
+
+    test('a codec the caller gave is kept', () async {
+      server.handler = versionIs('surrealdb-2.3.0');
+      final codec = _CountingCodec();
+      final db = Surreal();
+      await db.connect(server.url, options: ConnectOptions(codec: codec));
+      final before = codec.encoded;
+      await db.query('RETURN 1');
+      expect(codec.encoded, greaterThan(before));
+      await db.close();
+    });
+
     test('can be turned off', () async {
       server.handler = versionIs('surrealdb-5.0.0');
       final db = Surreal();
@@ -95,4 +143,14 @@ void main() {
       await db.close();
     });
   });
+}
+
+class _CountingCodec extends CborCodec {
+  var encoded = 0;
+
+  @override
+  Uint8List encode(Object? value) {
+    encoded++;
+    return super.encode(value);
+  }
 }
