@@ -416,6 +416,116 @@ void main() {
       await expectLater(closed, throwsA(isA<InvalidSessionError>()));
     });
 
+    test('a transaction begun as a refused reset or close runs keeps going',
+        () async {
+      final session = await db.newSession();
+      final held = <FakeRequest>[];
+      server.handler = (r) => switch (r.method) {
+            'begin' => () {
+                held.add(r);
+                return const FakeSilence();
+              }(),
+            'reset' || 'detach' => const FakeError(
+                'There was a problem with the datastore',
+                extra: {'kind': 'Internal'}),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      final onClient = db.beginTransaction();
+      final onSession = session.beginTransaction();
+      await eventually(() => held.length == 2);
+      await expectLater(db.reset(), throwsA(isA<ServerError>()));
+      await expectLater(session.close(), throwsA(isA<ServerError>()));
+      for (final request in held) {
+        reply(request, result: txnId);
+      }
+      expect((await onClient).id, txnId);
+      expect((await onSession).id, txnId);
+      expect(server.methods, isNot(contains('cancel')));
+    });
+
+    test('a transaction begun as a reset runs is cancelled', () async {
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'begin') {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final beginning = db.beginTransaction();
+      await eventually(() => held != null);
+      await db.reset();
+      reply(held!, result: txnId);
+      await expectLater(beginning, throwsA(isA<TransactionClosedError>()));
+      expect(last('cancel').params, [txnId]);
+    });
+
+    test('a live query started as a reset runs is killed', () async {
+      final queryId = Uuid('0192e3c4-0000-7000-8000-0000000000bb');
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'live') {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final starting = db.live('person');
+      await eventually(() => held != null);
+      await db.reset();
+      reply(held!, result: queryId);
+      await expectLater(starting, throwsA(isA<SurrealError>()));
+      expect(last('kill').params, [queryId]);
+    });
+
+    test('a second close waits for the first', () async {
+      final session = await db.newSession();
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'detach') {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final first = session.close();
+      final second = session.close();
+      await eventually(() => held != null);
+      reply(held!, error: {
+        'code': -32000,
+        'message': 'There was a problem with the datastore',
+        'kind': 'Internal',
+      });
+      await expectLater(first, throwsA(isA<ServerError>()));
+      await expectLater(second, throwsA(isA<ServerError>()));
+      expect(session.isClosed, isFalse);
+      expect(server.methods.where((m) => m == 'detach'), hasLength(1));
+    });
+
+    test('a fork that fails and cannot be detached is not kept', () async {
+      await db.set('x', 1);
+      server.handler = (r) => switch (r.method) {
+            'let' =>
+              const FakeError('Bad variable', extra: {'kind': 'Validation'}),
+            'detach' => const FakeError(
+                'There was a problem with the datastore',
+                extra: {'kind': 'Internal'}),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await expectLater(db.forkSession(), throwsA(isA<ValidationError>()));
+      final fork = last('attach').raw['session'];
+      server.handler = FakeSurrealServer.defaultReply;
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(
+          server.requests
+              .where((r) => r.method == 'attach' && r.raw['session'] == fork),
+          isEmpty);
+    });
+
     test('a call that completes while detach is refused keeps its effect',
         () async {
       final session = await db.newSession();
