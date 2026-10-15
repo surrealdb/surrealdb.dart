@@ -210,11 +210,21 @@ class WebSocketEngine implements Engine {
             ..close();
           return;
         }
-        final requestId = id = _protocol.nextId();
-        _streams[requestId] = controller;
-        final payload = _protocol.encodeRequest(requestId, method, params,
-            session: session, txn: txn);
-        channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+        final requestId = _protocol.nextId();
+        try {
+          final payload = _protocol.encodeRequest(requestId, method, params,
+              session: session, txn: txn);
+          _streams[requestId] = controller;
+          channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+        } catch (error, stackTrace) {
+          // Not sent, for example because a binding cannot be encoded.
+          _streams.remove(requestId);
+          controller
+            ..addError(error, stackTrace)
+            ..close();
+          return;
+        }
+        id = requestId;
         final timeout = _requestTimeout;
         if (timeout != null) {
           // Only the wait for the first reply is limited: a stream may then
@@ -286,14 +296,19 @@ class WebSocketEngine implements Engine {
     if (channel == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
     final completer = Completer<Object?>();
-    _pending[id] = completer;
     final payload =
         _protocol.encodeRequest(id, method, params, session: session, txn: txn);
     // A variable is kept as it was sent, decoded from the request itself, so
     // that later changes to the caller's objects cannot change what a
     // reconnect replays.
     final sent = method == 'let' ? _paramsOf(payload) : params;
-    channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+    _pending[id] = completer;
+    try {
+      channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+    } catch (_) {
+      _pending.remove(id);
+      rethrow;
+    }
     final timeout = _requestTimeout;
     final Object? result;
     if (timeout == null) {
