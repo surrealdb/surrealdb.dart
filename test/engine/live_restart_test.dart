@@ -60,4 +60,16 @@ void main() {
     await server.dropAll();
     await eventually(() => failing.id != failingBefore);
   });
+
+  test('liveOf needs a live connection', () async {
+    final offline = Surreal();
+    addTearDown(offline.close);
+    await offline.connect(server.url,
+        options:
+            const ConnectOptions(reconnect: ReconnectOptions(enabled: false)));
+    await server.dropAll();
+    await eventually(() => offline.status == ConnectionStatus.disconnected);
+    expect(() => offline.liveOf(Uuid.v4()),
+        throwsA(isA<ConnectionUnavailableError>()));
+  });
 }
