@@ -548,17 +548,21 @@ class Surreal {
   /// session is signed out when the access token expires.
   void _scheduleRenewal({Duration? after}) {
     final token = _session.token;
-    if (!_renewTokens || token == null || _authCalls > 0) return;
+    if (token == null || _authCalls > 0) return;
     final expiry = tokenExpiry(token);
     if (expiry == null) return;
     _renewalTimer?.cancel();
-    if (_session.refreshToken == null && _renewWith == null) {
+    // A refresh token can still be used once the access token has expired,
+    // for example by a reconnect, even with renewal off.
+    if (_session.refreshToken == null &&
+        (!_renewTokens || _renewWith == null)) {
       _renewalTimer = Timer(_untilExpiry(expiry), () {
         _renewalTimer = null;
         if (_session.token == token) _session.setTokens(null, null);
       });
       return;
     }
+    if (!_renewTokens) return;
     final delay = after ?? renewalDelay(expiry, _tokenExpiryMargin);
     _renewalTimer = Timer(delay, () => _renew(token, expiry));
   }
@@ -628,6 +632,7 @@ class Surreal {
         _session.replayDatabase == database) {
       return;
     }
+    final engine = _engine;
     try {
       await _use(
         namespace is SurrealNone ? _unchanged : namespace as String?,
@@ -638,8 +643,9 @@ class Surreal {
       // it reports.
     } on SurrealError {
       // The connection is down, or was dropped because the call timed out.
-      // Keep the selection wanted, which the reconnect then makes.
-      _session.applyUse([namespace, database]);
+      // Keep the selection wanted, which the reconnect then makes, unless
+      // the client was closed meanwhile, which forgot the session.
+      if (identical(_engine, engine)) _session.applyUse([namespace, database]);
     }
   }
 

@@ -93,7 +93,8 @@ class ConnectOptions {
   /// Whether to renew the session's access token before it expires: with
   /// its refresh token when there is one, otherwise by signing in again with
   /// [authentication]. Tokens without an expiry are never renewed. A
-  /// session left with neither is signed out when its access token expires.
+  /// session with no refresh token, and no credentials to sign in again
+  /// with while this is on, is signed out when its access token expires.
   final bool renewTokens;
 
   /// How long before the access token expires to renew it. When the token
