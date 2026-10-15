@@ -367,14 +367,28 @@ class Surreal {
     _liveByUuid[message.queryId.toString()]?.query.emit(message);
   }
 
+  /// Starts every registered live query again after a reconnect. Each query
+  /// is restarted on its own: one that fails keeps its registration, receives
+  /// the error on its stream, and is tried again on the next reconnect.
   Future<void> _restartLiveQueries() async {
-    final registrations = List.of(_liveByUuid.values);
-    _liveByUuid.clear();
-    for (final registration in registrations) {
-      final uuid = _asUuid(await _rpc('live', [
-        _thing(registration.resource),
-        registration.diff,
-      ]));
+    for (final entry in _liveByUuid.entries.toList()) {
+      final oldId = entry.key;
+      final registration = entry.value;
+      final Uuid uuid;
+      try {
+        uuid = _asUuid(await _rpc('live', [
+          _thing(registration.resource),
+          registration.diff,
+        ]));
+      } catch (error, stackTrace) {
+        registration.query.emitError(error, stackTrace);
+        continue;
+      }
+      if (_liveByUuid.remove(oldId) == null) {
+        // Killed while the restart was in flight, so stop the new query too.
+        unawaited(_rpc('kill', [uuid]).then((_) {}, onError: (_) {}));
+        continue;
+      }
       registration.query.rebind(uuid);
       _liveByUuid[uuid.toString()] = registration;
     }
