@@ -49,15 +49,29 @@ class WebSocketEngine implements Engine {
   var _intentionalClose = false;
   var _reconnecting = false;
 
-  /// The session state, replayed after a reconnect.
+  /// The state of the connection's default session, replayed after a
+  /// reconnect.
   final SessionState _session;
+
+  /// The state of each attached session, by id, attached again and replayed
+  /// after a reconnect.
+  final Map<Uuid, SessionState> _attached = {};
+
+  @override
+  bool get supportsSessions => true;
+
+  @override
+  void trackSession(Uuid id, SessionState state) => _attached[id] = state;
+
+  @override
+  void untrackSession(Uuid id) => _attached.remove(id);
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
   Future<void> Function(
           Future<Object?> Function(String method, List<Object?> params) call)?
       _onVerify;
-  Future<bool> Function(Object error,
+  Future<bool> Function(Uuid? session, Object error,
           Future<Object?> Function(String method, List<Object?> params) call)?
       _onAuthenticationLost;
 
@@ -87,6 +101,7 @@ class WebSocketEngine implements Engine {
   @override
   set onAuthenticationLost(
           Future<bool> Function(
+                  Uuid? session,
                   Object error,
                   Future<Object?> Function(String method, List<Object?> params)
                       call)?
@@ -163,22 +178,25 @@ class WebSocketEngine implements Engine {
   }
 
   @override
-  Future<Object?> rpc(String method, List<Object?> params) async {
+  Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
     if (_status != ConnectionStatus.connected) {
       throw const ConnectionUnavailableError();
     }
-    return _call(method, params);
+    return _call(method, params, session: session, txn: txn);
   }
 
   /// Sends a request on the current socket. Unlike [rpc] this does not need
   /// the connection to be fully restored, so it is used to replay the session.
-  Future<Object?> _call(String method, List<Object?> params) async {
+  Future<Object?> _call(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
     final channel = _channel;
     if (channel == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
     final completer = Completer<Object?>();
     _pending[id] = completer;
-    final payload = _protocol.encodeRequest(id, method, params);
+    final payload =
+        _protocol.encodeRequest(id, method, params, session: session, txn: txn);
     // A variable is kept as it was sent, decoded from the request itself, so
     // that later changes to the caller's objects cannot change what a
     // reconnect replays.
@@ -199,7 +217,8 @@ class WebSocketEngine implements Engine {
         throw RequestTimeoutError(method, timeout);
       });
     }
-    _session.apply(method, sent, result);
+    (session == null ? _session : _attached[session])
+        ?.apply(method, sent, result);
     return result;
   }
 
@@ -217,6 +236,11 @@ class WebSocketEngine implements Engine {
     'unset',
     'reset',
     'refresh',
+    'attach',
+    'detach',
+    'begin',
+    'commit',
+    'cancel',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -308,37 +332,60 @@ class WebSocketEngine implements Engine {
     }
   }
 
+  /// Replays the default session, then attaches and replays every attached
+  /// session.
   Future<void> _restoreSession() async {
-    final session = _session;
-    final namespace = session.replayNamespace;
-    final database = session.replayDatabase;
+    await _restoreState(_session, null);
+    final attached = <Uuid, SessionState>{};
+    for (final MapEntry(key: id, value: state) in _attached.entries.toList()) {
+      // A session closed while earlier ones were replayed is left out.
+      if (!identical(_attached[id], state)) continue;
+      await _call('attach', const [], session: id);
+      attached[id] = state;
+      await _restoreState(state, id);
+    }
+    // Sessions closed once attached here could not send their own detach,
+    // as the connection was not ready, so send it now.
+    while (true) {
+      final closed = [
+        for (final MapEntry(key: id, value: state) in attached.entries)
+          if (!identical(_attached[id], state)) id,
+      ];
+      if (closed.isEmpty) break;
+      for (final id in closed) {
+        attached.remove(id);
+        await _call('detach', const [], session: id);
+      }
+    }
+  }
+
+  Future<void> _restoreState(SessionState state, Uuid? session) async {
+    final namespace = state.replayNamespace;
+    final database = state.replayDatabase;
     // A selection only partly known is made after authenticating, which may
     // select the rest.
     final known = namespace is! SurrealNone && database is! SurrealNone;
     if (known && (namespace != null || database != null)) {
-      await _call('use', [namespace, database]);
+      await _call('use', [namespace, database], session: session);
     }
-    for (final MapEntry(:key, :value) in session.variables.entries) {
-      await _call('let', [key, value]);
+    for (final MapEntry(:key, :value) in state.variables.entries.toList()) {
+      await _call('let', [key, value], session: session);
     }
-    final token = session.token;
+    final token = state.token;
     if (token != null) {
-      final refresh = session.refreshToken;
+      final refresh = state.refreshToken;
       final expiry = tokenExpiry(token);
       final expired = expiry != null && !expiry.isAfter(DateTime.now().toUtc());
+      final pair = {'access': token, 'refresh': refresh};
       try {
         if (expired && refresh != null) {
-          await _call('refresh', [
-            {'access': token, 'refresh': refresh},
-          ]);
+          await _call('refresh', [pair], session: session);
         } else {
           try {
-            await _call('authenticate', [token]);
+            await _call('authenticate', [token], session: session);
           } on ResponseError catch (error) {
             if (refresh == null || !rejectsAuthentication(error)) rethrow;
-            await _call('refresh', [
-              {'access': token, 'refresh': refresh},
-            ]);
+            await _call('refresh', [pair], session: session);
           }
         }
       } on ResponseError catch (error) {
@@ -348,42 +395,47 @@ class WebSocketEngine implements Engine {
         // one, for example because they expired. The driver may sign in
         // again; if that fails for now, the attempt fails with the tokens
         // kept, so the next one tries again.
-        final signedIn = await _onAuthenticationLost?.call(error, _call);
+        final signedIn = await _onAuthenticationLost?.call(session, error,
+            (method, params) => _call(method, params, session: session));
         // The connection itself is fine, so otherwise carry on without them
         // rather than failing every attempt.
-        if (signedIn != true) session.setTokens(null, null);
+        if (signedIn != true) state.setTokens(null, null);
       }
     }
     if (!known) {
       if (namespace is! SurrealNone || database is! SurrealNone) {
-        await _useKeeping(namespace, database);
+        await _useKeeping(namespace, database, session);
       }
     } else if (token != null &&
         (namespace == null ||
             database == null ||
-            session.replayNamespace != namespace ||
-            session.replayDatabase != database)) {
+            state.replayNamespace != namespace ||
+            state.replayDatabase != database)) {
       // Cleared, or changed by authenticating, which selects what the
       // token names.
-      await _call('use', [namespace, database]);
+      await _call('use', [namespace, database], session: session);
     }
   }
 
   /// Selects [namespace] and [database], keeping the session's own for one
   /// that is NONE.
-  Future<void> _useKeeping(Object? namespace, Object? database) async {
+  Future<void> _useKeeping(
+      Object? namespace, Object? database, Uuid? session) async {
     if (codec is! CborCodec) {
       // NONE would arrive as null and clear it, so send what is selected.
-      final result = await _call('query', [
-        'RETURN [session::ns(), session::db()]',
-        const <String, Object?>{},
-      ]);
+      final result = await _call(
+          'query',
+          [
+            'RETURN [session::ns(), session::db()]',
+            const <String, Object?>{},
+          ],
+          session: session);
       final [current] = result! as List<Object?>;
       final [ns, db] = (current! as Map)['result'] as List<Object?>;
       if (namespace is SurrealNone) namespace = ns;
       if (database is SurrealNone) database = db;
     }
-    await _call('use', [namespace, database]);
+    await _call('use', [namespace, database], session: session);
   }
 
   void _failPending(Object error) {

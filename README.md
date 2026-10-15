@@ -11,6 +11,9 @@ web, and desktop), since it depends only on portable packages.
 - WebSocket and HTTP engines, selected automatically by the connection URL.
 - Live queries delivered as a Dart `Stream`, with automatic reconnect and
   restart on the WebSocket engine.
+- Sessions as objects (`newSession`, `forkSession`, `sessions`) and
+  interactive transactions (`beginTransaction`, `commit`, `cancel`) over
+  WebSocket.
 - The full RPC surface: `use`, `signin`, `signup`, `authenticate`, `invalidate`,
   `reset`, `info`, `set`, `unset`, `query`, `select`, `create`, `insert`,
   `insertRelation`, `update`, `upsert`, `merge`, `patch`, `delete`, `relate`,
@@ -115,6 +118,42 @@ query cannot be restarted after a reconnect, so its stream then reports a
 
 Live queries require the WebSocket engine. Calling `live` over the HTTP engine
 throws an `UnsupportedFeatureError`.
+
+### Sessions and transactions
+
+Over WebSocket, one connection can carry several sessions, each with its own
+namespace, database, variables, authentication and live queries. The client
+itself is the default session; `newSession` attaches an empty one and
+`forkSession` one that starts as a copy. Sessions are attached again and
+replayed after a reconnect.
+
+```dart
+final tenant = await db.newSession();
+await tenant.signin(tenantCredentials);
+await tenant.use(namespace: 'acme', database: 'app');
+final rows = await tenant.query('SELECT * FROM invoice');
+
+print(await db.sessions()); // ids of the attached sessions
+await tenant.close();
+```
+
+Interactive transactions run on the client or on any session:
+
+```dart
+final txn = await db.beginTransaction();
+try {
+  await txn.merge(const RecordId('account', 'a'), {'balance': 90});
+  await txn.merge(const RecordId('account', 'b'), {'balance': 110});
+} catch (_) {
+  await txn.cancel();
+  rethrow;
+}
+// Outside the try: a commit that fails has already ended the transaction.
+await txn.commit();
+```
+
+Both need SurrealDB 3.0 or later. They are not available over HTTP, where
+every request is its own session.
 
 ### Errors
 

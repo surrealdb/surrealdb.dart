@@ -44,9 +44,18 @@ class RpcProtocol {
   /// A fresh request id.
   String nextId() => (_counter++).toString();
 
-  /// Encodes a request envelope.
-  Uint8List encodeRequest(String id, String method, List<Object?> params) =>
-      codec.encode({'id': id, 'method': method, 'params': params});
+  /// Encodes a request envelope. A [session] runs the request in that
+  /// attached session instead of the connection's default one, and a [txn]
+  /// runs it inside that transaction.
+  Uint8List encodeRequest(String id, String method, List<Object?> params,
+          {Uuid? session, Uuid? txn}) =>
+      codec.encode({
+        'id': id,
+        'method': method,
+        'params': params,
+        if (session != null) 'session': session,
+        if (txn != null) 'txn': txn,
+      });
 
   /// Decodes a single response. Used by request and response transports such as
   /// HTTP, where every message is a response.
