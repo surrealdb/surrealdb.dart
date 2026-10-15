@@ -192,18 +192,23 @@ Future<void> main() async {
 
 ## Testing
 
-Run the unit tests, which need no server:
+Run the unit tests, which need no server, on the VM and in Chrome:
 
 ```sh
-dart test test/cbor test/value test/memory
+dart test test/cbor test/engine test/json test/memory test/value
+dart test --platform chrome test/cbor test/engine test/json test/memory test/value
 ```
 
 Run the integration tests against a local server:
 
 ```sh
 surreal start --user root --pass root memory
-SURREAL_INTEGRATION=1 dart test test/integration
+SURREAL_INTEGRATION=1 dart test --concurrency=1 test/integration
 ```
+
+Point them at another server with `SURREAL_WS_URL` and `SURREAL_HTTP_URL`.
+CI runs the integration tests against the latest 3.x release and the nightly
+build.
 
 ## License
 
