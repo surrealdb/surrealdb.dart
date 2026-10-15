@@ -123,6 +123,28 @@ void main() {
       await db.close();
     });
 
+    test('a set is replayed as an array to a server moved back to 2.x',
+        () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      addTearDown(db.close);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      await db.set('s', {1, 2});
+      expect(server.requests.last.params[1], isA<Set<Object?>>());
+
+      server.handler = versionIs('surrealdb-2.3.0');
+      server.requests.clear();
+      await server.dropAll();
+      await eventually(() => server.methods.contains('let'));
+      expect(server.methods.first, 'version');
+      expect(server.requests.last.params[1], isA<List<Object?>>());
+    });
+
     test('a codec the caller gave is kept', () async {
       server.handler = versionIs('surrealdb-2.3.0');
       final codec = _CountingCodec();
@@ -132,6 +154,54 @@ void main() {
       await db.query('RETURN 1');
       expect(codec.encoded, greaterThan(before));
       await db.close();
+    });
+
+    test('an unsupported server is never reported as connected', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      await db.use(namespace: 'ns', database: 'db');
+      final statuses = <ConnectionStatus>[];
+      db.statusChanges.listen(statuses.add);
+      server.requests.clear();
+
+      server.handler = versionIs('surrealdb-5.0.0');
+      await server.dropAll();
+      await eventually(() => db.status == ConnectionStatus.disconnected);
+      expect(statuses, isNot(contains(ConnectionStatus.connected)));
+      // Nothing of the session was sent to it.
+      expect(server.methods, ['version']);
+    });
+
+    test('a failed version check is a failed reconnect attempt', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      addTearDown(db.close);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      await db.live('person');
+
+      var failures = 0;
+      server.handler = (request) =>
+          request.method == 'version' && failures++ < 2
+              ? const FakeError('There was a problem with the database')
+              : FakeSurrealServer.defaultReply(request);
+      server.requests.clear();
+      await server.dropAll();
+
+      await eventually(() => server.methods.contains('live'));
+      expect(db.status, ConnectionStatus.connected);
+      expect(server.methods.where((m) => m == 'version'), hasLength(3));
+      expect(server.accepted, 4);
     });
 
     test('can be turned off', () async {
