@@ -277,6 +277,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// [SurrealTransaction]. Needs the WebSocket engine and SurrealDB 3.0 or
   /// later.
   Future<SurrealTransaction> beginTransaction() async {
+    _checkOpen();
     _client._requireSessions('transactions');
     final id = _asUuid(await _call('begin'));
     return SurrealTransaction._(_client, _sessionId, id);

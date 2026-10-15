@@ -72,7 +72,14 @@ final class SurrealTransaction with SurrealQueryable {
   Stream<QueryFrame> queryStream(String query,
       {Map<String, Object?>? bindings}) {
     _checkOpen();
-    return _tracked(super.queryStream(query, bindings: bindings));
+    // The stream checks the transaction is open when it is listened to, not
+    // as its calls go out: [commit] waits for a stream listened to before
+    // it, whose calls may only go out after.
+    return _tracked(_streamQuery(query, bindings,
+        call: (method, params) =>
+            _client._rpc(method, params, session: _session, txn: id),
+        callStream: (method, params) =>
+            _client._rpcStream(method, params, session: _session, txn: id)));
   }
 
   @override
@@ -95,6 +102,12 @@ final class SurrealTransaction with SurrealQueryable {
     late final StreamController<T> controller;
     controller = StreamController<T>(
       onListen: () {
+        if (_done) {
+          controller
+            ..addError(const TransactionClosedError())
+            ..close();
+          return;
+        }
         _openStreams.add(ended.future);
         subscription = source
             .listen(controller.add, onError: controller.addError, onDone: () {
