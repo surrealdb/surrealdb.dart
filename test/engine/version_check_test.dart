@@ -61,6 +61,32 @@ void main() {
       expect(server.methods, ['version']);
     });
 
+    test('connected is published only once the version is checked', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      bool? checked;
+      db.statusChanges.listen((status) {
+        if (status == ConnectionStatus.connected) {
+          checked ??= server.methods.contains('version');
+        }
+      });
+      await db.connect(server.url);
+      await eventually(() => checked != null);
+      expect(checked, isTrue);
+      await db.close();
+    });
+
+    test('an unsupported server is never published as connected', () async {
+      server.handler = versionIs('surrealdb-5.0.0');
+      final db = Surreal();
+      final statuses = <ConnectionStatus>[];
+      db.statusChanges.listen(statuses.add);
+      await expectLater(
+          db.connect(server.url), throwsA(isA<UnsupportedVersionError>()));
+      await Future<void>.delayed(Duration.zero);
+      expect(statuses, isNot(contains(ConnectionStatus.connected)));
+    });
+
     test('accepts a 4.x server', () async {
       server.handler = versionIs('surrealdb-4.0.0');
       final db = Surreal();
