@@ -122,6 +122,17 @@ void main() {
     ]);
   });
 
+  test('a server known to take options that refuses POST fails the export',
+      () async {
+    server.exportTakesPost = false;
+    await db.connect(server.url);
+    await expectLater(
+        db.export(options: const ExportOptions(accesses: false)),
+        throwsA(isA<HttpConnectionError>()
+            .having((e) => e.statusCode, 'statusCode', 405)));
+    expect(server.requests, isNot(contains('GET /export')));
+  });
+
   test('export falls back to GET when the version is not known', () async {
     server.exportTakesPost = false;
     await db.connect(server.url,

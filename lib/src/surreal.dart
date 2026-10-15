@@ -644,8 +644,9 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
                   (version == null || version.first >= 3))),
           );
     // A server whose version was not checked may still be one that only
-    // exports with GET.
-    if (response.statusCode == 405 && options != null) {
+    // exports with GET. From a server known to take options, a 405 is a
+    // failure: exporting everything instead would ignore them.
+    if (response.statusCode == 405 && options != null && version == null) {
       response = await exportAll();
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
