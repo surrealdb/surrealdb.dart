@@ -119,12 +119,17 @@ final class _TokenRenewal {
     final session =
         _sessionId == null ? _client : _client._attached[_sessionId];
     try {
-      await session?.use(
-        namespace: namespace is SurrealNone ? _unchanged : namespace as String?,
-        database: database is SurrealNone ? _unchanged : database as String?,
+      await session?._use(
+        namespace is SurrealNone ? _unchanged : namespace as String?,
+        database is SurrealNone ? _unchanged : database as String?,
       );
+    } on ResponseError {
+      // Refused, so the session stays as signing in left it, which is what
+      // it reports.
     } on SurrealError {
-      // The session stays as signing in left it, which is what it reports.
+      // The connection is down, or was dropped because the call timed out.
+      // Keep the selection wanted, which the reconnect then makes.
+      _state.applyUse([namespace, database]);
     }
   }
 

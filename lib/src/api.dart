@@ -120,7 +120,7 @@ final class ApiResponse {
       headers: headers is Map
           ? {
               for (final e in headers.entries)
-                e.key.toString(): e.value.toString(),
+                e.key.toString().toLowerCase(): e.value.toString(),
             }
           : const {},
       body: body,
@@ -130,7 +130,8 @@ final class ApiResponse {
   /// The HTTP status the API returned.
   final int status;
 
-  /// The headers the API returned.
+  /// The headers the API returned, with their names in lower case, as
+  /// header names are not case sensitive.
   final Map<String, String> headers;
 
   /// The body the API returned: [none] when it returned no body, as distinct
