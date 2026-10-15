@@ -261,6 +261,9 @@ class WebSocketEngine implements Engine {
     final ended = Completer<void>();
     _cancelling[requestId] = ended;
     void abandon() {
+      // Once the stream has ended the query has stopped, so a cancel that
+      // fails because it came too late is harmless.
+      if (_cancelling[requestId] != ended) return;
       if (channel != null) _resetChannel(channel);
       _ended(requestId);
     }
