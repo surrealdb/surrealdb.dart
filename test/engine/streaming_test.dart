@@ -3,6 +3,7 @@ library;
 
 import 'dart:async';
 
+import 'package:surrealdb/src/engine/websocket_engine.dart';
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -241,6 +242,73 @@ void main() {
     await read;
     await committing;
     expect(server.methods.last, 'commit');
+  });
+
+  for (final version in ['surrealdb-3.3.4', 'surrealdb-3.2.0']) {
+    test('a commit straight after listening runs the query first ($version)',
+        () async {
+      final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
+      await connect(version);
+      server.handler = (r) => switch (r.method) {
+            'begin' => FakeResult(txn),
+            'query_stream' => const FakeResults(frames),
+            'query' => const FakeResult([
+                {'status': 'OK', 'time': '1ms', 'result': 1},
+              ]),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      final transaction = await db.beginTransaction();
+      final read = transaction.queryStream('q').toList();
+      await transaction.commit();
+      expect(await read, isNotEmpty);
+      expect(server.methods.last, 'commit');
+    });
+  }
+
+  test('a stream first listened to after commit fails', () async {
+    final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
+    await connect('surrealdb-3.3.4');
+    server.handler = (r) => r.method == 'begin'
+        ? FakeResult(txn)
+        : FakeSurrealServer.defaultReply(r);
+    final transaction = await db.beginTransaction();
+    final stream = transaction.queryStream('q');
+    await transaction.commit();
+    await expectLater(stream.toList(), throwsA(isA<TransactionClosedError>()));
+    expect(server.methods, isNot(contains('query_stream')));
+  });
+
+  test('cancelling a timed out stream waits for it to stop', () async {
+    final engine = WebSocketEngine(const CborCodec(),
+        requestTimeout: const Duration(milliseconds: 300));
+    addTearDown(engine.close);
+    await engine.open(Uri.parse(server.url));
+    var cancelled = false;
+    var ended = false;
+    server.handler = (r) {
+      switch (r.method) {
+        case 'query_stream':
+          return const FakeSilence();
+        case 'query_cancel':
+          cancelled = true;
+          Timer(const Duration(milliseconds: 200), () {
+            ended = true;
+            server.push({
+              'id': r.params.first,
+              'result': {'stream': 'end', 'results': 0, 'time': '1ms'},
+            });
+          });
+          return const FakeResult(null);
+        default:
+          return FakeSurrealServer.defaultReply(r);
+      }
+    };
+    final subscription = engine
+        .rpcStream('query_stream', ['q', <String, Object?>{}]).listen((_) {},
+            onError: (_) {});
+    await eventually(() => cancelled);
+    await subscription.cancel();
+    expect(ended, isTrue);
   });
 
   test('streaming is tried again after a reconnect', () async {

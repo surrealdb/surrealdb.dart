@@ -238,7 +238,8 @@ class WebSocketEngine implements Engine {
         if (requestId == null) return null;
         _firstFrame.remove(requestId)?.cancel();
         if (_streams.remove(requestId) == null || _channel == null) {
-          return null;
+          // A stream that timed out may still be stopping on the server.
+          return _cancelling[requestId]?.future;
         }
         // Cancelled before the end, so stop the work on the server too, and
         // wait until it has stopped: a stream in a transaction is still
