@@ -23,22 +23,40 @@ final class _TokenRenewal {
   /// How many calls that change the authentication are under way.
   var _authCalls = 0;
 
+  /// Completes when the last call to change the authentication is done.
+  Future<void> _queue = Future.value();
+
   /// Runs [call], which changes the session's authentication, with renewal
   /// held off: a renewal under way finishes first, and none starts until
   /// [call] is done, so a renewal can never run alongside it and undo it.
   /// Unless [keepCredentials], the credentials for signing in again are
   /// forgotten, since they belong to the authentication being replaced.
+  ///
+  /// Calls run one at a time, in order, so each sees the session the last
+  /// one left. One that fails leaves the authentication as it was, so its
+  /// credentials are kept.
   Future<T> during<T>(Future<T> Function() call,
       {bool keepCredentials = false}) async {
-    if (!keepCredentials) credentials = null;
     _authCalls++;
     _timer?.cancel();
     _timer = null;
+    final previous = _queue;
+    final done = Completer<void>();
+    _queue = done.future;
     try {
+      await previous;
       final renewing = _renewing;
       if (renewing != null) await renewing;
-      return await call();
+      final kept = credentials;
+      if (!keepCredentials) credentials = null;
+      try {
+        return await call();
+      } catch (_) {
+        credentials ??= kept;
+        rethrow;
+      }
     } finally {
+      done.complete();
       _authCalls--;
       if (_authCalls == 0) _schedule();
     }

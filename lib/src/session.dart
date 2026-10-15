@@ -118,7 +118,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
         final expired =
             expiry != null && !expiry.isAfter(DateTime.now().toUtc());
         if (refreshToken != null && expired) {
-          await refresh(Tokens(access: token, refresh: refreshToken));
+          await _refresh(Tokens(access: token, refresh: refreshToken));
           return;
         }
         // The session takes both tokens at once, when the call succeeds.
@@ -127,7 +127,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
           await _call('authenticate', [token]);
         } on NotAllowedError {
           if (refreshToken == null) rethrow;
-          await refresh(Tokens(access: token, refresh: refreshToken));
+          await _refresh(Tokens(access: token, refresh: refreshToken));
           return;
         } finally {
           _state.expectTokens(null, null);
@@ -141,14 +141,17 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// A refresh token can be used once: the server revokes it as it issues
   /// the new one. Needs SurrealDB 3.0 or later and an access method defined
   /// `WITH REFRESH`.
-  Future<Tokens> refresh([Tokens? tokens]) => _changingAuth(() async {
-        final current = tokens ?? this.tokens;
-        if (current?.refresh == null) {
-          throw const AuthenticationError(
-              'There is no refresh token to refresh the session with');
-        }
-        return _tokensFrom(await _call('refresh', [current!.toJson()]));
-      }, keepCredentials: true);
+  Future<Tokens> refresh([Tokens? tokens]) =>
+      _changingAuth(() => _refresh(tokens ?? this.tokens),
+          keepCredentials: true);
+
+  Future<Tokens> _refresh(Tokens? tokens) async {
+    if (tokens?.refresh == null) {
+      throw const AuthenticationError(
+          'There is no refresh token to refresh the session with');
+    }
+    return _tokensFrom(await _call('refresh', [tokens!.toJson()]));
+  }
 
   /// Revokes a refresh token so it can no longer be used. Uses the session's
   /// own [tokens] unless others are given. The session stays authenticated

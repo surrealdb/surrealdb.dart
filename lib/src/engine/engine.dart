@@ -51,12 +51,32 @@ abstract class Engine {
   /// never emit on this stream.
   Stream<LiveMessage> get liveNotifications;
 
+  /// Called on a re established connection before the session is restored
+  /// and before it is reported as connected, with a function that sends calls
+  /// on it. The driver uses this to check the server again. If it throws, the
+  /// attempt counts as failed and is tried again, unless the handler closed
+  /// the engine.
+  set onVerify(
+      Future<void> Function(
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler);
+
   /// Called after a dropped connection has been re established. The driver uses
   /// this to restart live queries.
   set onReconnect(Future<void> Function()? handler);
 
-  /// Called when a reconnect could not restore authentication, for example
-  /// because the token expired while the connection was down. The connection
-  /// continues without authentication.
-  set onAuthenticationLost(void Function(Object error)? handler);
+  /// Called when a reconnect could not restore a session's authentication
+  /// because the server rejected the tokens, for example because they
+  /// expired while the connection was down, with the session (null for the
+  /// default one) and a function that sends calls in it. The driver can sign in again with it; otherwise the
+  /// connection continues without authentication. If it throws, the attempt
+  /// counts as failed and is tried again.
+  set onAuthenticationLost(
+      Future<void> Function(
+              Uuid? session,
+              Object error,
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler);
 }

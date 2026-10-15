@@ -42,6 +42,32 @@ void main() {
     await db.query('RETURN 1');
   });
 
+  test('a timed out session change starts again on a new socket', () async {
+    await db.connect(server.url,
+        options: const ConnectOptions(
+          versionCheck: false,
+          requestTimeout: Duration(milliseconds: 300),
+          reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          ),
+        ));
+    await db.use(namespace: 'a', database: 'b');
+    server.handler = (request) =>
+        request.method == 'use' && request.params.first == 'c'
+            ? const FakeSilence()
+            : FakeSurrealServer.defaultReply(request);
+
+    await expectLater(db.use(namespace: 'c', database: 'd'),
+        throwsA(isA<RequestTimeoutError>()));
+    // The server may or may not have switched, so the session it is known to
+    // have is restored on a new socket.
+    await eventually(
+        () => server.accepted == 2 && db.status == ConnectionStatus.connected);
+    expect(server.requests.last.method, 'use');
+    expect(server.requests.last.params, ['a', 'b']);
+  });
+
   test('a null request timeout waits for the reply', () async {
     await db.connect(server.url,
         options: const ConnectOptions(requestTimeout: null));
