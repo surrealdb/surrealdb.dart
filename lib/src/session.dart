@@ -242,9 +242,14 @@ mixin SurrealSessionMethods on SurrealQueryable {
 
   /// Stops the live query with the given [id].
   Future<void> kill(Uuid id) async {
-    final registration = _client._liveByUuid.remove(id.toString());
     await _call('kill', [id]);
-    await registration?.query.dispose();
+    // A kill stops only a query of this session, so a query registered by
+    // another session keeps its handle.
+    final registration = _client._liveByUuid[id.toString()];
+    if (registration != null && registration.session == _sessionId) {
+      _client._liveByUuid.remove(id.toString());
+      await registration.query.dispose();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -263,9 +268,15 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Starts a new session on the same connection that begins as a copy of
   /// this one: the same namespace, database, variables and authentication.
   /// From then on the two are independent.
+  ///
+  /// The fork gets the access token but not the refresh token, which can be
+  /// used only once. It renews by signing in again when this session has
+  /// the credentials to (those given to `connect`), and otherwise stays
+  /// authenticated until the access token expires.
   Future<SurrealSession> forkSession() async {
     _checkOpen();
-    return _client._attachSession(copyOf: _state.copy());
+    return _client._attachSession(
+        copyOf: _state.copy(), credentials: _renewal.credentials);
   }
 }
 
@@ -322,7 +333,12 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
     _client._attached.remove(id);
     _client._engine?.untrackSession(id);
     await _client._disposeLiveQueries(id);
-    await _client._rpc('detach', const [], session: id);
+    try {
+      await _client._rpc('detach', const [], session: id);
+    } on ConnectionUnavailableError {
+      // The connection is down. Its sessions went with it, and this one is
+      // no longer tracked, so it is not attached again.
+    }
   }
 
   @override

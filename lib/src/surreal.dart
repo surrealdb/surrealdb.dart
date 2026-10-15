@@ -302,7 +302,8 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     return [for (final id in result as List) _asUuid(id)];
   }
 
-  Future<SurrealSession> _attachSession({SessionState? copyOf}) async {
+  Future<SurrealSession> _attachSession(
+      {SessionState? copyOf, AnyAuth? credentials}) async {
     final engine = _requireSessions('sessions');
     final id = Uuid.v4();
     final state = SessionState();
@@ -310,6 +311,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     engine.trackSession(id, state);
     final session = SurrealSession._(this, id, state);
     state.onTokensChanged = session._renewal.reschedule;
+    session._renewal.credentials = credentials;
     _attached[id] = session;
     if (copyOf != null) {
       try {
@@ -319,10 +321,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
         for (final MapEntry(:key, :value) in copyOf.variables.entries) {
           await _rpc('let', [key, value], session: id);
         }
+        // The access token is shared, but not the refresh token: it can be
+        // used only once, so two sessions renewing with it would fail.
         final token = copyOf.token;
         if (token != null) {
           await _rpc('authenticate', [token], session: id);
-          state.setTokens(token, copyOf.refreshToken);
         }
       } catch (_) {
         await session.close();
@@ -357,8 +360,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   Future<void> _killLive(LiveQuery query) async {
-    final registration = _liveByUuid.remove(query.id.toString());
+    final registration = _liveByUuid[query.id.toString()];
+    // Sent in the session the query runs in, and forgotten only once the
+    // server has stopped it.
     await _rpc('kill', [query.id], session: registration?.session);
+    _liveByUuid.remove(query.id.toString());
     await query.dispose();
   }
 

@@ -281,8 +281,15 @@ class WebSocketEngine implements Engine {
   Future<void> _restoreSession() async {
     await _restoreState(_session, null);
     for (final MapEntry(key: id, value: state) in _attached.entries.toList()) {
+      // A session closed while earlier ones were replayed is left out.
+      if (!identical(_attached[id], state)) continue;
       await _call('attach', const [], session: id);
       await _restoreState(state, id);
+      // One closed while it was replayed could not send its own detach, as
+      // the connection was not ready, so send it now.
+      if (!identical(_attached[id], state)) {
+        await _call('detach', const [], session: id);
+      }
     }
   }
 
