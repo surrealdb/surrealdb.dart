@@ -49,10 +49,16 @@ final class _TokenRenewal {
     final previous = _queue;
     final done = Completer<void>();
     _queue = done.future;
+    final engine = _client._engine;
     try {
       await previous;
       final renewing = _renewing;
       if (renewing != null) await renewing;
+      // The client was closed, and maybe connected again, while this call
+      // waited its turn: it belongs to the old connection.
+      if (!identical(_client._engine, engine)) {
+        throw const ConnectionUnavailableError();
+      }
       final kept = credentials;
       if (!keepCredentials) credentials = null;
       try {
@@ -133,6 +139,9 @@ final class _TokenRenewal {
     } on ResponseError {
       // Refused, so the session stays as signing in left it, which is what
       // it reports.
+    } on InvalidSessionError {
+      // The session is closing, so nothing was sent and the session stays
+      // as signing in left it, should the close be refused.
     } on SurrealError {
       // The connection is down, or was dropped because the call timed out.
       // Keep the selection wanted, which the reconnect then makes, unless
