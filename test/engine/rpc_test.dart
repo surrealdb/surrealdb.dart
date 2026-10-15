@@ -1,4 +1,5 @@
 import 'dart:convert' show jsonEncode, utf8;
+import 'dart:typed_data';
 
 import 'package:surrealdb/src/engine/rpc.dart';
 import 'package:surrealdb/src/json/codec.dart';
@@ -148,6 +149,11 @@ void main() {
         '9007199254740993');
     expect(parseRecordId('person:[9007199254740993]')?.id.toString(),
         '[9007199254740993]');
+    // Bytes, as the server writes them.
+    expect(parseRecordId('item:[b"7879", b""]')?.id, [
+      Uint8List.fromList([0x78, 0x79]),
+      Uint8List(0),
+    ]);
     expect(parseRecordId('person:[1, '), isNull);
     expect(parseRecordId('person'), isNull);
   });
