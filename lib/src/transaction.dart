@@ -12,15 +12,17 @@ part of 'surreal.dart';
 /// try {
 ///   await txn.create(const RecordId('account', 'a'), {'balance': 90});
 ///   await txn.create(const RecordId('account', 'b'), {'balance': 110});
-///   await txn.commit();
 /// } catch (_) {
 ///   await txn.cancel();
 ///   rethrow;
 /// }
+/// // Outside the try: a commit that fails has already ended the transaction.
+/// await txn.commit();
 /// ```
 ///
 /// A transaction lives on the server connection, so it is lost if the
-/// connection drops: later calls on it then fail with a [NotFoundError].
+/// connection drops, or the session is reset or closed: later calls on it
+/// then fail with a [ServerError] saying it was not found.
 final class SurrealTransaction with SurrealQueryable {
   SurrealTransaction._(this._client, this._session, this.id);
 

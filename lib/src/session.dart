@@ -19,6 +19,9 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Throws when the session can no longer be used.
   void _checkOpen() {}
 
+  /// Counts the resets and closes that end the session's transactions.
+  var _generation = 0;
+
   /// Renews the session's tokens before they expire.
   _TokenRenewal get _renewal;
 
@@ -178,6 +181,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// variable, cancels its transactions and stops its live queries. The
   /// connection stays open.
   Future<void> reset() async {
+    _generation++;
     await _changingAuth(() => _call('reset'));
     // The server has stopped every live query of the session.
     await _client._disposeLiveQueries(_sessionId);
@@ -218,6 +222,8 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// re-established.
   Future<LiveQuery> live(Object resource, {bool diff = false}) async {
     final uuid = _asUuid(await _call('live', [_thing(resource), diff]));
+    // Closing the session meanwhile stopped the query on the server.
+    _checkOpen();
     return _client._registerLive(uuid, _sessionId, resource, diff);
   }
 
@@ -274,7 +280,13 @@ mixin SurrealSessionMethods on SurrealQueryable {
   Future<SurrealTransaction> beginTransaction() async {
     _checkOpen();
     _client._requireSessions('transactions');
+    final generation = _generation;
     final id = _asUuid(await _call('begin'));
+    if (_generation != generation) {
+      // A reset or close meanwhile cancelled it on the server.
+      _checkOpen();
+      throw const TransactionClosedError();
+    }
     return SurrealTransaction._(_client, _sessionId, id);
   }
 
@@ -342,21 +354,23 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
-    _client._attached.remove(id);
-    _client._engine?.untrackSession(id);
+    _generation++;
+    // Still tracked while detach is under way, so that replies to calls
+    // already sent still update its state.
     try {
       await _client._rpc('detach', const [], session: id);
-    } on ConnectionUnavailableError {
-      // The connection is down. Its sessions went with it, and this one is
-      // no longer tracked, so it is not attached again.
     } on ResponseError {
       // The server refused, so the session is still attached: keep it, so
       // that it can be closed again and is attached again on a reconnect.
       _closed = false;
-      _client._attached[id] = this;
-      _client._engine?.trackSession(id, _state);
       rethrow;
+    } on SurrealError {
+      // The connection is down, or was dropped because detach timed out.
+      // Its sessions went with it, and once this one is no longer tracked
+      // it is not attached again.
     }
+    _client._attached.remove(id);
+    _client._engine?.untrackSession(id);
     _renewal.stop();
     await _client._disposeLiveQueries(id);
   }
