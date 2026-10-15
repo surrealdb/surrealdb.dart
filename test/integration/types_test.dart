@@ -47,6 +47,13 @@ void main() {
       expect(await db.select(const RecordId('nothing_here', 1)), isNull);
     });
 
+    test('a function that returns NONE gives none, not null', () async {
+      await db.query('DEFINE FUNCTION OVERWRITE fn::nothing(\$null: bool) { '
+          'RETURN IF \$null { NULL } ELSE { NONE } }');
+      expect(await db.run('fn::nothing', args: [false]), same(none));
+      expect(await db.run('fn::nothing', args: [true]), isNull);
+    });
+
     test('sets round trip as a Set', () async {
       final [set, isSet] = await db
           .query(r'RETURN <set>[3, 1, 1]; RETURN type::is_set($s);', bindings: {

@@ -175,7 +175,8 @@ mixin SurrealQueryable {
         if (data != null) data,
       ]);
 
-  /// Runs a built in or user defined function and returns its result.
+  /// Runs a built in or user defined function and returns its result. A
+  /// function that returns NONE gives [none], not null.
   Future<dynamic> run(String name, {String? version, List<Object?>? args}) =>
       _call('run', [name, version, args ?? const []]);
 }
