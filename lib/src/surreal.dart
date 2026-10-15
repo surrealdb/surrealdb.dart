@@ -456,10 +456,13 @@ class Surreal {
     return client;
   }
 
-  Future<Object?> _rpc(String method, [List<Object?> params = const []]) {
+  /// Sends an RPC call. A result of NONE, which methods that return nothing
+  /// give, comes back as null.
+  Future<Object?> _rpc(String method, [List<Object?> params = const []]) async {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
-    return engine.rpc(method, params);
+    final result = await engine.rpc(method, params);
+    return result is SurrealNone ? null : result;
   }
 
   SurrealValue _thing(Object resource) {

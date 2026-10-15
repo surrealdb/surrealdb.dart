@@ -59,7 +59,8 @@ class RpcProtocol {
   RpcIncoming? decodeIncoming(List<int> bytes) {
     final decoded = codec.decode(bytes);
     if (decoded is! Map) return null;
-    if (decoded['id'] != null) return _responseFrom(decoded);
+    final id = decoded['id'];
+    if (id != null && id is! SurrealNone) return _responseFrom(decoded);
     final result = decoded['result'];
     if (result is Map && result['action'] != null) {
       final message = _liveMessage(result);

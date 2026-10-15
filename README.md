@@ -17,7 +17,8 @@ web, and desktop), since it depends only on portable packages.
   `run`, `live`, `kill`, `import`, `export`, `version`, and `health`.
 - Native data types: `RecordId`, `StringRecordId`, `Table`, `Range`, `Uuid`,
   `Decimal`, `SurrealDuration`, `SurrealDateTime`, `SurrealFuture`, `FileRef`,
-  and the geometry types, all carried losslessly through the CBOR codec.
+  the geometry types, Dart `Set`s, and `none` for NONE (distinct from `null`,
+  which is NULL), all carried losslessly through the CBOR codec.
 - Record access, system user, and bearer authentication.
 - A standalone client for the Agent Memory API.
 

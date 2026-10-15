@@ -23,6 +23,40 @@ void main() {
       expect(matches, isTrue);
     });
 
+    test('NONE and NULL stay distinct', () async {
+      final [noneValue, nullValue, object, noneMatches, nullMatches, fields] =
+          await db.query(
+              r'RETURN NONE; RETURN NULL; RETURN {a: NONE, b: NULL}; '
+              r'RETURN $n IS NONE; RETURN $u IS NULL; '
+              r'RETURN [type::is_none($o.a), type::is_null($o.b)];',
+              bindings: {
+            'n': none,
+            'u': null,
+            'o': {'a': none, 'b': null},
+          });
+      expect(noneValue, same(none));
+      expect(nullValue, isNull);
+      expect(object, {'a': none, 'b': null});
+      expect(noneMatches, isTrue);
+      expect(nullMatches, isTrue);
+      expect(fields, [true, true]);
+    });
+
+    test('a method that returns nothing gives null', () async {
+      await db.query('DEFINE TABLE IF NOT EXISTS nothing_here');
+      expect(await db.select(const RecordId('nothing_here', 1)), isNull);
+    });
+
+    test('sets round trip as a Set', () async {
+      final [set, isSet] = await db
+          .query(r'RETURN <set>[3, 1, 1]; RETURN type::is_set($s);', bindings: {
+        's': {1, 2}
+      });
+      expect(set, isA<Set<Object?>>());
+      expect(set, {1, 3});
+      expect(isSet, isTrue);
+    });
+
     test('range bounds decode with their inclusivity', () async {
       final [half, closed, open] =
           await db.query('RETURN 1..5; RETURN 1..=5; RETURN 1>..5;');

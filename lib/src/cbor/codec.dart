@@ -66,6 +66,11 @@ class CborCodec implements SurrealCodec {
           for (final entry in value.entries)
             _toCbor(entry.key): _toCbor(entry.value),
         });
+      case Set():
+        return CborList(
+          [for (final item in value) _toCbor(item)],
+          tags: const [SurrealCborTags.set],
+        );
       case Iterable():
         return CborList([for (final item in value) _toCbor(item)]);
     }
@@ -113,6 +118,8 @@ class CborCodec implements SurrealCodec {
         );
       case Geometry():
         return _geometryToCbor(value);
+      case SurrealNone():
+        return const CborNull(tags: [SurrealCborTags.none]);
     }
   }
 
@@ -207,7 +214,7 @@ class CborCodec implements SurrealCodec {
   Object? _applyTag(int tag, Object? value) {
     switch (tag) {
       case SurrealCborTags.none:
-        return null;
+        return none;
       case SurrealCborTags.table:
         return Table(value as String);
       case SurrealCborTags.recordId:
@@ -259,7 +266,7 @@ class CborCodec implements SurrealCodec {
         final parts = (value as List).cast<String>();
         return FileRef(parts[0], parts[1]);
       case SurrealCborTags.set:
-        return value;
+        return <Object?>{...value as List};
       case SurrealCborTags.geometryPoint:
         final parts = value as List;
         return GeometryPoint(_toDouble(parts[0]), _toDouble(parts[1]));
