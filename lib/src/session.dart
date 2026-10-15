@@ -38,6 +38,9 @@ mixin SurrealSessionMethods on SurrealQueryable {
       return result;
     } on ResponseError {
       rethrow;
+    } on InvalidSessionError {
+      // Refused here, before it was sent.
+      rethrow;
     } catch (_) {
       _generation++;
       rethrow;
@@ -97,8 +100,10 @@ mixin SurrealSessionMethods on SurrealQueryable {
     return Tokens(access: access, refresh: _state.refreshToken);
   }
 
-  /// The variables defined with [set].
-  Map<String, Object?> get variables => Map.unmodifiable(_state.variables);
+  /// The variables defined with [set]: a copy, so that changing it, or a
+  /// value in it, does not change what the session holds.
+  Map<String, Object?> get variables =>
+      Map.unmodifiable(_client._copyOf(_state.variables));
 
   /// Selects the [namespace] and [database] for subsequent operations.
   ///
