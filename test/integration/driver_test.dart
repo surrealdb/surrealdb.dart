@@ -181,5 +181,19 @@ void main() {
 
       await live.kill();
     });
+
+    test('a diff live query reports the record id over JSON', () async {
+      await db.query('DEFINE TABLE IF NOT EXISTS widget');
+      await db.create(const RecordId('widget', 'diff'), {'size': 1});
+      final live = await db.live('widget', diff: true);
+      final received = live.stream.first;
+
+      await db.merge(const RecordId('widget', 'diff'), {'size': 2});
+
+      final message = await received.timeout(const Duration(seconds: 5));
+      expect(message.recordId, const RecordId('widget', 'diff'));
+
+      await live.kill();
+    });
   }, skip: enabled ? false : 'set SURREAL_INTEGRATION=1 to run');
 }
