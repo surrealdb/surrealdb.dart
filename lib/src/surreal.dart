@@ -387,9 +387,6 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     _attached[id] = session;
     if (copyOf != null) {
       try {
-        if (copyOf.namespace != null || copyOf.database != null) {
-          await _rpc('use', [copyOf.namespace, copyOf.database], session: id);
-        }
         for (final MapEntry(:key, :value) in copyOf.variables.entries) {
           await _rpc('let', [key, value], session: id);
         }
@@ -398,6 +395,18 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
         final token = copyOf.token;
         if (token != null) {
           await _rpc('authenticate', [token], session: id);
+        }
+        // Selected after authenticating, which selects what the token
+        // names, so that the parent's selection is the one that stays.
+        final namespace = copyOf.replayNamespace;
+        final database = copyOf.replayDatabase;
+        final nothing = namespace == null && database == null && token == null;
+        if ((namespace is! SurrealNone || database is! SurrealNone) &&
+            !nothing) {
+          await session._use(
+            namespace is SurrealNone ? _unchanged : namespace as String?,
+            database is SurrealNone ? _unchanged : database as String?,
+          );
         }
       } catch (_) {
         await session.close();
@@ -435,10 +444,12 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     return engine;
   }
 
-  /// A deep copy of [value], made by encoding and decoding it.
-  static Map<String, Object?> _copyOf(Map<String, Object?> value) =>
-      (const CborCodec().decode(const CborCodec().encode(value)) as Map)
-          .cast<String, Object?>();
+  /// A deep copy of [value], made by encoding and decoding it with the
+  /// codec requests are sent with.
+  Map<String, Object?> _copyOf(Map<String, Object?> value) {
+    final codec = _engine?.codec ?? const CborCodec();
+    return (codec.decode(codec.encode(value)) as Map).cast<String, Object?>();
+  }
 
   /// Reschedules renewal and tells listeners whenever the tokens change.
   void _onTokensChanged() {
