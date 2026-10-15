@@ -49,8 +49,16 @@ abstract class Engine {
   /// this to restart live queries.
   set onReconnect(Future<void> Function()? handler);
 
-  /// Called when a reconnect could not restore authentication, for example
-  /// because the token expired while the connection was down. The connection
-  /// continues without authentication.
-  set onAuthenticationLost(void Function(Object error)? handler);
+  /// Called when a reconnect could not restore authentication because the
+  /// server rejected the tokens, for example because they expired while the
+  /// connection was down, with a function that sends calls on the new
+  /// connection. The driver can sign in again with it; otherwise the
+  /// connection continues without authentication. If it throws, the attempt
+  /// counts as failed and is tried again.
+  set onAuthenticationLost(
+      Future<void> Function(
+              Object error,
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler);
 }

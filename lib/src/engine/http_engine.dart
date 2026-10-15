@@ -81,7 +81,12 @@ class HttpEngine implements Engine {
   set onReconnect(Future<void> Function()? handler) {}
 
   @override
-  set onAuthenticationLost(void Function(Object error)? handler) {}
+  set onAuthenticationLost(
+      Future<void> Function(
+              Object error,
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
 
   @override
   Future<void> open(Uri url,

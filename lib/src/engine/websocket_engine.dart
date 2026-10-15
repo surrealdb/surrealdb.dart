@@ -55,7 +55,9 @@ class WebSocketEngine implements Engine {
   Future<void> Function(
           Future<Object?> Function(String method, List<Object?> params) call)?
       _onVerify;
-  void Function(Object error)? _onAuthenticationLost;
+  Future<void> Function(Object error,
+          Future<Object?> Function(String method, List<Object?> params) call)?
+      _onAuthenticationLost;
 
   @override
   ConnectionStatus get status => _status;
@@ -81,7 +83,12 @@ class WebSocketEngine implements Engine {
   set onReconnect(Future<void> Function()? handler) => _onReconnect = handler;
 
   @override
-  set onAuthenticationLost(void Function(Object error)? handler) =>
+  set onAuthenticationLost(
+          Future<void> Function(
+                  Object error,
+                  Future<Object?> Function(String method, List<Object?> params)
+                      call)?
+              handler) =>
       _onAuthenticationLost = handler;
 
   void _setStatus(ConnectionStatus value) {
@@ -319,20 +326,21 @@ class WebSocketEngine implements Engine {
         } else {
           try {
             await _call('authenticate', [token]);
-          } on ResponseError {
-            if (refresh == null) rethrow;
+          } on ResponseError catch (error) {
+            if (refresh == null || !rejectsAuthentication(error)) rethrow;
             await _call('refresh', [
               {'access': token, 'refresh': refresh},
             ]);
           }
         }
       } on ResponseError catch (error) {
+        // Any other failure fails the attempt, which is tried again.
+        if (!rejectsAuthentication(error)) rethrow;
         // The server rejected the token, and the refresh token if there was
         // one, for example because they expired. The connection itself is
-        // fine, so carry on without authentication rather than failing every
-        // attempt.
+        // fine, so carry on without them rather than failing every attempt.
         session.setTokens(null, null);
-        _onAuthenticationLost?.call(error);
+        await _onAuthenticationLost?.call(error, _call);
       }
     }
   }
