@@ -31,6 +31,14 @@ void main() {
       );
     });
 
+    test('reads and writes years of 365 days, as the server does', () {
+      final duration = SurrealDuration.parse('1y2w');
+      expect(duration.seconds, 365 * 86400 + 14 * 86400);
+      expect(SurrealDuration.years(1).seconds, 365 * 86400);
+      expect(duration.toString(), '1y2w');
+      expect(SurrealDuration.weeks(53).toString(), '1y6d');
+    });
+
     test('parses sub second units', () {
       final duration = SurrealDuration.parse('500ms');
       expect(duration.seconds, 0);
