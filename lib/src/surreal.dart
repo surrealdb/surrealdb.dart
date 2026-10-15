@@ -245,7 +245,7 @@ class Surreal {
       _renewWith = null;
       _renewalTimer?.cancel();
       _renewalTimer = null;
-      _session.clear();
+      _session.clear(cleared: false);
       _version = null;
     }
   }
