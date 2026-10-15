@@ -20,8 +20,53 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Throws when the session can no longer be used.
   void _checkOpen() {}
 
-  /// Counts the resets and closes that end the session's transactions.
+  /// Counts the resets and closes that have ended the session's
+  /// transactions and live queries.
   var _generation = 0;
+
+  /// The resets and closes under way, each of which may end them.
+  final _ending = <Future<void>>{};
+
+  /// Runs [end], a reset or detach. It ends the session's transactions and
+  /// live queries when it succeeds, or fails without an answer, which drops
+  /// the socket, but not when the server refuses it.
+  Future<T> _ends<T>(Future<T> Function() end) async {
+    final done = Completer<void>();
+    _ending.add(done.future);
+    try {
+      final result = await end();
+      _generation++;
+      return result;
+    } on ResponseError {
+      rethrow;
+    } catch (_) {
+      _generation++;
+      rethrow;
+    } finally {
+      _ending.remove(done.future);
+      done.complete();
+    }
+  }
+
+  /// Waits for the resets and closes under way, and returns whether one has
+  /// ended what was started at [generation].
+  Future<bool> _endedSince(int generation) async {
+    while (_ending.isNotEmpty) {
+      await Future.wait(List.of(_ending));
+    }
+    return _generation != generation;
+  }
+
+  /// Sends [method] for [id], something started as a reset or close ended
+  /// the session, so that nothing is left running without a handle. It may
+  /// well be gone already, so a failure is expected.
+  Future<void> _discard(String method, Uuid id) async {
+    try {
+      await _client._rpc(method, [id], session: _sessionId);
+    } catch (_) {
+      // Gone already.
+    }
+  }
 
   /// Renews the session's tokens before they expire.
   _TokenRenewal get _renewal;
@@ -191,8 +236,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// variable, cancels its transactions and stops its live queries. The
   /// connection stays open.
   Future<void> reset() async {
-    _generation++;
-    await _changingAuth(() => _call('reset'));
+    await _ends(() => _changingAuth(() => _call('reset')));
     // The server has stopped every live query of the session.
     await _client._disposeLiveQueries(_sessionId);
   }
@@ -231,8 +275,16 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// The query is restarted, with a new id, if the connection drops and is
   /// re-established.
   Future<LiveQuery> live(Object resource, {bool diff = false}) async {
+    final generation = _generation;
     final uuid = _asUuid(await _call('live', [_thing(resource), diff]));
-    // Closing the session meanwhile stopped the query on the server.
+    if (await _endedSince(generation)) {
+      // A reset or close meanwhile may have stopped it, or may have been
+      // done before it started.
+      await _discard('kill', uuid);
+      _checkOpen();
+      throw const SurrealError(
+          'The session was reset while the live query was starting');
+    }
     _checkOpen();
     return _client._registerLive(uuid, _sessionId, resource, diff);
   }
@@ -292,8 +344,10 @@ mixin SurrealSessionMethods on SurrealQueryable {
     _client._requireSessions('transactions');
     final generation = _generation;
     final id = _asUuid(await _call('begin'));
-    if (_generation != generation) {
-      // A reset or close meanwhile cancelled it on the server.
+    if (await _endedSince(generation)) {
+      // A reset or close meanwhile may have cancelled it, or may have been
+      // done before it started.
+      await _discard('cancel', id);
       _checkOpen();
       throw const TransactionClosedError();
     }
@@ -367,14 +421,21 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
 
   /// Detaches the session from the server, which stops its live queries and
   /// cancels its transactions.
-  Future<void> close() async {
-    if (_closed) return;
+  Future<void> close() {
+    if (_closing case final closing?) return closing;
+    if (_closed) return Future.value();
+    return _closing = _close().whenComplete(() => _closing = null);
+  }
+
+  /// The [close] under way, which a second call waits for.
+  Future<void>? _closing;
+
+  Future<void> _close() async {
     _closed = true;
-    _generation++;
     // Still tracked while detach is under way, so that replies to calls
     // already sent still update its state.
     try {
-      await _client._rpc('detach', const [], session: id);
+      await _ends(() => _client._rpc('detach', const [], session: id));
     } on ResponseError {
       // The server refused, so the session is still attached: keep it, so
       // that it can be closed again and is attached again on a reconnect.
@@ -385,6 +446,12 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
       // Its sessions went with it, and once this one is no longer tracked
       // it is not attached again.
     }
+    await _forget();
+  }
+
+  /// Closes the session here, without detaching it.
+  Future<void> _forget() async {
+    _closed = true;
     _client._attached.remove(id);
     _client._engine?.untrackSession(id);
     _renewal.stop();

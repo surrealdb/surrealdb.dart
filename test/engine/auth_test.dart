@@ -235,13 +235,17 @@ void main() {
 
     test('does not renew tokens when renewal is off', () async {
       server.handler = (r) => r.method == 'signin'
-          ? issueTokens(r, const Duration(milliseconds: 300))
+          ? issueTokens(r, const Duration(seconds: 1))
           : FakeSurrealServer.defaultReply(r);
       await db.connect(server.url,
           options:
               const ConnectOptions(versionCheck: false, renewTokens: false));
       await db.signin(const RootAuth(username: 'u', password: 'p'));
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await db.revoke();
+      expect(db.tokens, isNotNull);
+      // Signed out once the token expires, without trying to renew it.
+      await eventually(() => db.tokens == null,
+          timeout: const Duration(seconds: 3));
       expect(server.methods, isNot(contains('refresh')));
     });
 
@@ -637,6 +641,38 @@ void main() {
       expect(db.database, 'other');
       final replayed = server.requests.where((r) => r.method == 'use').last;
       expect(replayed.params, ['ns', 'other']);
+    });
+
+    test('a selection lost as the client closes is not kept', () async {
+      var signins = 0;
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'signin') {
+          signins++;
+          return FakeResult(fakeJwt(
+              signins == 1
+                  ? const Duration(seconds: 1)
+                  : const Duration(hours: 1),
+              id: '$signins',
+              claims: {'NS': 'ns', 'DB': 'db'}));
+        }
+        if (r.method == 'use' && signins == 2) {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: DatabaseAuth(
+                namespace: 'ns', database: 'db', username: 'u', password: 'p'),
+          ));
+      await db.use(database: 'other');
+      await eventually(() => held != null, timeout: const Duration(seconds: 3));
+      await db.close();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect([db.namespace, db.database], [null, null]);
     });
 
     test('credentials are copied with the codec they are sent with', () async {
