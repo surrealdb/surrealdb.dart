@@ -19,12 +19,17 @@ class WebSocketEngine implements Engine {
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
     Duration? requestTimeout = const Duration(seconds: 30),
-  })  : _codec = codec,
-        _protocol = RpcProtocol(codec),
+  })  : _protocol = RpcProtocol(codec),
         _reconnect = reconnect,
         _requestTimeout = requestTimeout;
 
-  final SurrealCodec _codec;
+  SurrealCodec get _codec => _protocol.codec;
+
+  @override
+  SurrealCodec get codec => _protocol.codec;
+
+  @override
+  set codec(SurrealCodec value) => _protocol.codec = value;
   final RpcProtocol _protocol;
   final ReconnectOptions _reconnect;
   final Duration? _requestTimeout;
@@ -222,7 +227,18 @@ class WebSocketEngine implements Engine {
         }
         if (_intentionalClose) return;
         _setStatus(ConnectionStatus.connected);
-        await _onReconnect?.call();
+        try {
+          await _onReconnect?.call();
+        } catch (_) {
+          // The hook reports its own failures, such as a live query that
+          // could not be restarted. The connection itself is restored.
+        }
+        // A drop while the hook ran was not handled, because this loop was
+        // still running, so try again.
+        if (_channel == null && !_intentionalClose) {
+          _setStatus(ConnectionStatus.reconnecting);
+          continue;
+        }
         return;
       }
       if (!_intentionalClose) _setStatus(ConnectionStatus.disconnected);

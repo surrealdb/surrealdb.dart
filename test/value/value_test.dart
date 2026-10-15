@@ -127,5 +127,17 @@ void main() {
       expect(value.inNanoseconds, -1);
       expect(value.toString(), '-1ns');
     });
+
+    test('a negative duration parses back from its string', () {
+      for (final value in [
+        SurrealDuration.fromDart(const Duration(milliseconds: -1500)),
+        SurrealDuration.nanoseconds(-1),
+        SurrealDuration.weeks(-3),
+      ]) {
+        expect(SurrealDuration.parse(value.toString()), value);
+      }
+      expect(() => SurrealDuration.parse('-'), throwsFormatException);
+      expect(() => SurrealDuration.parse('--1s'), throwsFormatException);
+    });
   });
 }

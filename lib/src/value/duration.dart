@@ -62,7 +62,15 @@ final class SurrealDuration extends SurrealValue {
       SurrealDuration(seconds: value * _secondsPerWeek);
 
   /// Parses a SurrealDB duration string such as `1w2d3h`, `500ms` or `90s`.
+  /// A leading `-` gives a negative duration, as [toString] writes one.
   factory SurrealDuration.parse(String input) {
+    if (input.startsWith('-')) {
+      final magnitude = input.substring(1);
+      if (magnitude.isEmpty || magnitude.startsWith('-')) {
+        throw FormatException('Invalid duration', input);
+      }
+      return SurrealDuration.parse(magnitude)._negated();
+    }
     if (input.isEmpty || input == '0' || input == '0ns') {
       return const SurrealDuration();
     }
@@ -131,19 +139,19 @@ final class SurrealDuration extends SurrealValue {
   /// Whether this duration is less than zero.
   bool get isNegative => seconds < 0;
 
+  /// The duration with the opposite sign, negated as (seconds, nanoseconds)
+  /// to stay exact for large values.
+  SurrealDuration _negated() => nanoseconds == 0
+      ? SurrealDuration(seconds: -seconds)
+      : SurrealDuration(
+          seconds: -seconds - 1,
+          nanoseconds: _nanosPerSecond - nanoseconds,
+        );
+
   @override
   String toString() {
     if (seconds == 0 && nanoseconds == 0) return '0ns';
-    if (isNegative) {
-      // Negate as (seconds, nanoseconds) to stay exact for large values.
-      final positive = nanoseconds == 0
-          ? SurrealDuration(seconds: -seconds)
-          : SurrealDuration(
-              seconds: -seconds - 1,
-              nanoseconds: _nanosPerSecond - nanoseconds,
-            );
-      return '-$positive';
-    }
+    if (isNegative) return '-${_negated()}';
     final buffer = StringBuffer();
     var remaining = seconds;
     void unit(int size, String suffix) {

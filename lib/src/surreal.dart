@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
 import 'engine/session_state.dart';
@@ -119,6 +120,15 @@ class Surreal {
       } catch (_) {
         await close();
         rethrow;
+      }
+      // Servers before 3.0 have no set type and reject its CBOR tag.
+      final codec = engine.codec;
+      final major = _parseVersion(_version ?? '')?.first;
+      if (codec is CborCodec &&
+          !codec.setsAsArrays &&
+          major != null &&
+          major < 3) {
+        engine.codec = const CborCodec(setsAsArrays: true);
       }
     }
     if (options.namespace != null || options.database != null) {
