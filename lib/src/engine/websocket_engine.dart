@@ -177,6 +177,10 @@ class WebSocketEngine implements Engine {
     _pending[id] = completer;
     final payload =
         _protocol.encodeRequest(id, method, params, session: session, txn: txn);
+    // A variable is kept as it was sent, decoded from the request itself, so
+    // that later changes to the caller's objects cannot change what a
+    // reconnect replays.
+    final sent = method == 'let' ? _paramsOf(payload) : params;
     channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
     final timeout = _requestTimeout;
     final Object? result;
@@ -190,9 +194,12 @@ class WebSocketEngine implements Engine {
       });
     }
     (session == null ? _session : _attached[session])
-        ?.apply(method, params, result);
+        ?.apply(method, sent, result);
     return result;
   }
+
+  List<Object?> _paramsOf(List<int> payload) =>
+      ((_codec.decode(payload) as Map)['params'] as List).cast<Object?>();
 
   void _onMessage(dynamic data) {
     final bytes = data is String ? utf8.encode(data) : (data as List<int>);
