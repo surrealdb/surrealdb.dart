@@ -326,8 +326,13 @@ class WebSocketEngine implements Engine {
       if (namespace is! SurrealNone || database is! SurrealNone) {
         await _useKeeping(namespace, database);
       }
-    } else if (token != null && (namespace == null || database == null)) {
-      // Cleared, but authenticating may have selected them again.
+    } else if (token != null &&
+        (namespace == null ||
+            database == null ||
+            session.replayNamespace != namespace ||
+            session.replayDatabase != database)) {
+      // Cleared, or changed by authenticating, which selects what the
+      // token names.
       await _call('use', [namespace, database]);
     }
   }
