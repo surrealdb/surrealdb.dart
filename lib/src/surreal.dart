@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
 import 'engine/session_state.dart';
@@ -10,9 +11,11 @@ import 'engine/websocket_engine.dart';
 import 'errors.dart';
 import 'internal/jwt.dart';
 import 'live_query.dart';
+import 'protocol/codec.dart';
 import 'protocol/codecs.dart';
 import 'types/auth.dart';
 import 'types/connection.dart';
+import 'types/export.dart';
 import 'types/live.dart';
 import 'types/patch.dart';
 import 'types/query_frame.dart';
@@ -70,6 +73,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   late final SessionState _session = SessionState()
     ..onTokensChanged = _onTokensChanged;
   String? _version;
+  SurrealCodec _codec = const CborCodec();
 
   // Token renewal.
   var _renewTokens = true;
@@ -182,7 +186,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   Engine _engineFor(Uri uri, ConnectOptions options) {
-    final codec = options.codec ?? codecForFormat(options.format);
+    final codec = _codec = options.codec ?? codecForFormat(options.format);
     switch (uri.scheme) {
       case 'ws':
       case 'wss':
@@ -447,30 +451,82 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   // Import and export
   // ---------------------------------------------------------------------------
 
-  /// Imports a SurrealQL document into the current namespace and database.
+  /// Imports a SurrealQL document, such as one from [export], into the
+  /// current namespace and database, over the server's HTTP `/import`
+  /// endpoint. Works with either engine.
+  ///
+  /// The document must start with `OPTION IMPORT;`, as exports do. The
+  /// import is not atomic: statements run one by one, and those that fail do
+  /// not stop the rest. When any fail, this throws an [ImportError] listing
+  /// them, after the others have been applied.
   Future<void> import(String surql) async {
     final response = await _http.post(
       _httpBase().replace(path: '/import'),
-      headers: _httpHeaders(contentType: 'text/plain'),
+      headers:
+          _httpHeaders(contentType: 'text/plain', accept: _codec.contentType),
       body: surql,
     );
+    final failures = _importFailures(response.bodyBytes);
+    if (failures != null && failures.isNotEmpty) {
+      throw ImportError(failures);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
-        'Import failed with status ${response.statusCode}',
+        'Import failed with status ${response.statusCode}'
+        '${_problem(response.bodyBytes)}',
         statusCode: response.statusCode,
       );
     }
   }
 
-  /// Exports the current namespace and database as a SurrealQL document.
-  Future<String> export() async {
-    final response = await _http.get(
-      _httpBase().replace(path: '/export'),
-      headers: _httpHeaders(accept: 'text/plain'),
-    );
+  /// The failed statements in an `/import` response, or null when the body
+  /// is not a list of statement results.
+  List<ServerError>? _importFailures(List<int> body) {
+    if (body.isEmpty) return null;
+    Object? decoded;
+    try {
+      decoded = _codec.decode(body);
+    } catch (_) {
+      return null;
+    }
+    if (decoded is! List) return null;
+    return [
+      for (final (index, statement) in decoded.indexed)
+        if (statement is Map && statement['status'] == 'ERR')
+          ServerError.fromStatement(statement, index: index),
+    ];
+  }
+
+  /// The explanation in an HTTP error body, as `: <text>`, if there is one.
+  String _problem(List<int> body) {
+    try {
+      final decoded = jsonDecode(utf8.decode(body));
+      if (decoded is Map && decoded['information'] is String) {
+        return ': ${decoded['information']}';
+      }
+    } catch (_) {
+      // Not a JSON problem document.
+    }
+    return '';
+  }
+
+  /// Exports the current namespace and database as a SurrealQL document,
+  /// over the server's HTTP `/export` endpoint. Works with either engine.
+  /// [options] choose what to include; servers before 2.1 ignore them.
+  Future<String> export({ExportOptions? options}) async {
+    final uri = _httpBase().replace(path: '/export');
+    final response = options == null
+        ? await _http.get(uri, headers: _httpHeaders(accept: 'text/plain'))
+        : await _http.post(
+            uri,
+            headers: _httpHeaders(
+                contentType: _codec.contentType, accept: 'text/plain'),
+            body: _codec.encode(options.toJson()),
+          );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
-        'Export failed with status ${response.statusCode}',
+        'Export failed with status ${response.statusCode}'
+        '${_problem(response.bodyBytes)}',
         statusCode: response.statusCode,
       );
     }
