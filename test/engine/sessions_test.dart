@@ -493,6 +493,80 @@ void main() {
       expect(db.variables['x'], [1]);
     });
 
+    test('a fork whose token is rejected signs in with the credentials',
+        () async {
+      final renewed = fakeJwt(const Duration(hours: 1), id: 'fork');
+      server.handler = (r) => switch (r.method) {
+            'authenticate' when r.raw['session'] != null => const FakeError(
+                'The token has expired',
+                code: -32002,
+                extra: {'kind': 'NotAllowed'}),
+            'signin' => FakeResult(r.raw['session'] == null
+                ? fakeJwt(const Duration(hours: 1))
+                : renewed),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      final client = Surreal();
+      addTearDown(client.close);
+      await client.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+          ));
+      final fork = await client.forkSession();
+      expect(fork.isClosed, isFalse);
+      expect(fork.tokens?.access, renewed);
+      expect(last('signin').raw['session'], fork.id);
+    });
+
+    test('a renewal of a closing session leaves its selection as signed in',
+        () async {
+      final heldSignin = <FakeRequest>[];
+      FakeRequest? heldDetach;
+      server.handler = (r) {
+        final session = r.raw['session'];
+        switch (r.method) {
+          case 'signin' when session == null:
+            return FakeResult(fakeJwt(const Duration(seconds: 1),
+                claims: {'NS': 'ns', 'DB': 'db'}));
+          case 'signin':
+            heldSignin.add(r);
+            return const FakeSilence();
+          case 'detach':
+            heldDetach = r;
+            return const FakeSilence();
+          default:
+            return FakeSurrealServer.defaultReply(r);
+        }
+      };
+      final client = Surreal();
+      addTearDown(client.close);
+      await client.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: DatabaseAuth(
+                namespace: 'ns', database: 'db', username: 'u', password: 'p'),
+          ));
+      await client.use(database: 'other');
+      final fork = await client.forkSession();
+      expect(fork.database, 'other');
+      await eventually(() => heldSignin.isNotEmpty,
+          timeout: const Duration(seconds: 3));
+      final closing = fork.close();
+      await eventually(() => heldDetach != null);
+      reply(heldSignin.first,
+          result: fakeJwt(const Duration(hours: 1),
+              claims: {'NS': 'ns', 'DB': 'db'}));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      reply(heldDetach!, error: {
+        'code': -32000,
+        'message': 'There was a problem with the datastore',
+        'kind': 'Internal',
+      });
+      await expectLater(closing, throwsA(isA<ServerError>()));
+      expect(fork.database, 'db');
+    });
+
     test('a live query started as a reset runs is killed', () async {
       final queryId = Uuid('0192e3c4-0000-7000-8000-0000000000bb');
       FakeRequest? held;

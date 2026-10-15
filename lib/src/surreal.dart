@@ -394,7 +394,19 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
         // used only once, so two sessions renewing with it would fail.
         final token = copyOf.token;
         if (token != null) {
-          await _rpc('authenticate', [token], session: id);
+          try {
+            await _rpc('authenticate', [token], session: id);
+          } on ResponseError catch (error) {
+            // The token expired or was revoked. With the parent's
+            // credentials the fork signs in for its own, as a reconnect
+            // would.
+            if (!_renewTokens ||
+                credentials == null ||
+                !rejectsAuthentication(error)) {
+              rethrow;
+            }
+            await _rpc('signin', [credentials], session: id);
+          }
         }
         // Selected after authenticating, which selects what the token
         // names, so that the parent's selection is the one that stays.
