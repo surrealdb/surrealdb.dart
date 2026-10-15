@@ -42,6 +42,7 @@ class WebSocketEngine implements Engine {
   String? _namespace;
   String? _database;
   String? _token;
+  final Map<String, Object?> _variables = {};
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
@@ -149,6 +150,10 @@ class WebSocketEngine implements Engine {
     final completer = Completer<Object?>();
     _pending[id] = completer;
     final payload = _protocol.encodeRequest(id, method, params);
+    // A variable is kept as it was sent, decoded from the request itself, so
+    // that later changes to the caller's objects cannot change what a
+    // reconnect replays.
+    final sent = method == 'let' ? _paramsOf(payload) : params;
     channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
     final timeout = _requestTimeout;
     final Object? result;
@@ -165,9 +170,12 @@ class WebSocketEngine implements Engine {
         throw RequestTimeoutError(method, timeout);
       });
     }
-    _trackSession(method, params, result);
+    _trackSession(method, sent, result);
     return result;
   }
+
+  List<Object?> _paramsOf(List<int> payload) =>
+      ((_codec.decode(payload) as Map)['params'] as List).cast<Object?>();
 
   /// Calls that change the server's session.
   static const _sessionMethods = {
@@ -206,6 +214,16 @@ class WebSocketEngine implements Engine {
         if (params.isNotEmpty) _token = params[0] as String?;
       case 'invalidate':
         _token = null;
+      case 'let':
+        final key = params[0] as String;
+        // `let` without a value removes the variable, as on the server.
+        if (params.length > 1) {
+          _variables[key] = params[1];
+        } else {
+          _variables.remove(key);
+        }
+      case 'unset':
+        _variables.remove(params[0] as String);
     }
   }
 
@@ -295,6 +313,9 @@ class WebSocketEngine implements Engine {
   Future<void> _restoreSession() async {
     if (_namespace != null || _database != null) {
       await _call('use', [_namespace, _database]);
+    }
+    for (final MapEntry(:key, :value) in _variables.entries) {
+      await _call('let', [key, value]);
     }
     final token = _token;
     if (token != null) {
