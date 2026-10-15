@@ -98,6 +98,7 @@ class Surreal {
     _engine = engine;
     _url = uri;
     engine.onReconnect = _restartLiveQueries;
+    engine.onAuthenticationLost = (_) => _accessToken = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_statusController.add);
 

@@ -33,6 +33,7 @@ class WebSocketEngine implements Engine {
   Uri? _url;
   Duration _timeout = const Duration(seconds: 30);
   var _intentionalClose = false;
+  var _reconnecting = false;
 
   // Session state, replayed after a reconnect.
   String? _namespace;
@@ -41,6 +42,7 @@ class WebSocketEngine implements Engine {
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
+  void Function(Object error)? _onAuthenticationLost;
 
   @override
   ConnectionStatus get status => _status;
@@ -54,6 +56,10 @@ class WebSocketEngine implements Engine {
   @override
   set onReconnect(Future<void> Function()? handler) => _onReconnect = handler;
 
+  @override
+  set onAuthenticationLost(void Function(Object error)? handler) =>
+      _onAuthenticationLost = handler;
+
   void _setStatus(ConnectionStatus value) {
     if (_status == value) return;
     _status = value;
@@ -66,46 +72,76 @@ class WebSocketEngine implements Engine {
     _url = url;
     _timeout = timeout;
     _intentionalClose = false;
+    _setStatus(ConnectionStatus.connecting);
     await _connect();
+    _setStatus(ConnectionStatus.connected);
   }
 
+  /// Opens a socket and makes it the current channel. On failure the socket
+  /// is closed, so a failed attempt never leaves a connection behind.
   Future<void> _connect() async {
-    _setStatus(_status == ConnectionStatus.disconnected
-        ? ConnectionStatus.connecting
-        : ConnectionStatus.reconnecting);
     final channel = WebSocketChannel.connect(_url!, protocols: [_codec.name]);
     try {
       await channel.ready.timeout(_timeout);
-    } on TimeoutException {
-      throw const SurrealError('Timed out while connecting to the server');
     } catch (error) {
+      unawaited(_closeChannel(channel));
+      if (error is TimeoutException) {
+        throw const SurrealError('Timed out while connecting to the server');
+      }
       throw SurrealError('Failed to connect to the server', cause: error);
     }
     _channel = channel;
     _subscription = channel.stream.listen(
       _onMessage,
-      onError: (Object error) => _onDisconnected(error),
-      onDone: () => _onDisconnected(null),
+      // Events from a socket that has since been replaced are ignored.
+      onError: (Object error) {
+        if (identical(_channel, channel)) _onDisconnected(error);
+      },
+      onDone: () {
+        if (identical(_channel, channel)) _onDisconnected(null);
+      },
     );
-    _setStatus(ConnectionStatus.connected);
+  }
+
+  Future<void> _closeChannel(WebSocketChannel channel) async {
+    try {
+      await channel.sink.close().timeout(_timeout);
+    } catch (_) {
+      // The socket is already gone.
+    }
+  }
+
+  /// Closes the current socket, if any, without triggering a reconnect.
+  Future<void> _dropChannel() async {
+    final channel = _channel;
+    final subscription = _subscription;
+    _channel = null;
+    _subscription = null;
+    await subscription?.cancel();
+    if (channel != null) await _closeChannel(channel);
   }
 
   @override
   Future<void> close() async {
     _intentionalClose = true;
-    await _subscription?.cancel();
-    await _channel?.sink.close();
-    _channel = null;
+    await _dropChannel();
     _failPending(const ConnectionUnavailableError());
     _setStatus(ConnectionStatus.disconnected);
   }
 
   @override
   Future<Object?> rpc(String method, List<Object?> params) async {
-    final channel = _channel;
-    if (channel == null || _status != ConnectionStatus.connected) {
+    if (_status != ConnectionStatus.connected) {
       throw const ConnectionUnavailableError();
     }
+    return _call(method, params);
+  }
+
+  /// Sends a request on the current socket. Unlike [rpc] this does not need
+  /// the connection to be fully restored, so it is used to replay the session.
+  Future<Object?> _call(String method, List<Object?> params) async {
+    final channel = _channel;
+    if (channel == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
     final completer = Completer<Object?>();
     _pending[id] = completer;
@@ -169,6 +205,8 @@ class WebSocketEngine implements Engine {
     _failPending(error == null
         ? const ConnectionUnavailableError()
         : SurrealError('Connection lost', cause: error));
+    // A drop while a reconnect is under way is handled by that loop.
+    if (_reconnecting) return;
     if (_reconnect.enabled) {
       unawaited(_reconnectLoop());
     } else {
@@ -177,31 +215,49 @@ class WebSocketEngine implements Engine {
   }
 
   Future<void> _reconnectLoop() async {
+    _reconnecting = true;
     _setStatus(ConnectionStatus.reconnecting);
-    var attempt = 0;
-    while (!_intentionalClose &&
-        (_reconnect.attempts < 0 || attempt < _reconnect.attempts)) {
-      attempt++;
-      await Future<void>.delayed(_reconnect.delayForAttempt(attempt));
-      if (_intentionalClose) return;
-      try {
-        await _connect();
-        await _restoreSession();
+    try {
+      var attempt = 0;
+      while (!_intentionalClose &&
+          (_reconnect.attempts < 0 || attempt < _reconnect.attempts)) {
+        attempt++;
+        await Future<void>.delayed(_reconnect.delayForAttempt(attempt));
+        if (_intentionalClose) return;
+        try {
+          await _connect();
+          await _restoreSession();
+        } catch (_) {
+          // Close whatever this attempt opened before trying again.
+          await _dropChannel();
+          continue;
+        }
+        if (_intentionalClose) return;
+        _setStatus(ConnectionStatus.connected);
         await _onReconnect?.call();
         return;
-      } catch (_) {
-        _setStatus(ConnectionStatus.reconnecting);
       }
+      if (!_intentionalClose) _setStatus(ConnectionStatus.disconnected);
+    } finally {
+      _reconnecting = false;
     }
-    _setStatus(ConnectionStatus.disconnected);
   }
 
   Future<void> _restoreSession() async {
     if (_namespace != null || _database != null) {
-      await rpc('use', [_namespace, _database]);
+      await _call('use', [_namespace, _database]);
     }
-    if (_token != null) {
-      await rpc('authenticate', [_token]);
+    final token = _token;
+    if (token != null) {
+      try {
+        await _call('authenticate', [token]);
+      } on ResponseError catch (error) {
+        // The server rejected the token, for example because it expired. The
+        // connection itself is fine, so carry on without authentication
+        // rather than failing every attempt.
+        _token = null;
+        _onAuthenticationLost?.call(error);
+      }
     }
   }
 

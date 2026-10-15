@@ -28,4 +28,9 @@ abstract class Engine {
   /// Called after a dropped connection has been re established. The driver uses
   /// this to restart live queries.
   set onReconnect(Future<void> Function()? handler);
+
+  /// Called when a reconnect could not restore authentication, for example
+  /// because the token expired while the connection was down. The connection
+  /// continues without authentication.
+  set onAuthenticationLost(void Function(Object error)? handler);
 }
