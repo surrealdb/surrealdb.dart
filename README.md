@@ -119,6 +119,31 @@ query cannot be restarted after a reconnect, so its stream then reports a
 Live queries require the WebSocket engine. Calling `live` over the HTTP engine
 throws an `UnsupportedFeatureError`.
 
+### Streaming results
+
+`queryStream` gives a query's results as they are produced instead of all at
+once. Each statement's rows arrive in `QueryRows` batches (or a single
+`QueryValue`), followed by a `QueryStatementDone` that carries the statement's
+error if it failed. Cancelling the subscription cancels the query on the
+server.
+
+```dart
+await for (final frame in db.queryStream('SELECT * FROM event')) {
+  switch (frame) {
+    case QueryRows(:final values):
+      values.forEach(process);
+    case QueryStatementDone(:final error?):
+      print('Statement ${frame.statement} failed: $error');
+    default:
+  }
+}
+```
+
+Results are streamed over WebSocket from SurrealDB 3.3. Over HTTP, or against
+an older server, the query runs as with `query` and the same frames are given
+when it completes. `query` itself never streams, so inside a transaction a
+query only streams when you ask for it with `queryStream`.
+
 ### Sessions and transactions
 
 Over WebSocket, one connection can carry several sessions, each with its own

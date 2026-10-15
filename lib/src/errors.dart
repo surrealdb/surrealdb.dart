@@ -217,7 +217,8 @@ class ServerError extends ResponseError {
   }
 
   /// Reads an RPC `error` object: `{code, message, kind?, details?, cause?}`.
-  factory ServerError.fromRpc(Map<dynamic, dynamic> error) {
+  factory ServerError.fromRpc(Map<dynamic, dynamic> error,
+      {int? statementIndex}) {
     final code = error['code'] is int ? error['code'] as int : null;
     final rawKind = error['kind'] is String ? error['kind'] as String : null;
     final cause = error['cause'];
@@ -229,6 +230,7 @@ class ServerError extends ResponseError {
       code: code,
       details: ErrorDetail.fromWire(error['details']),
       cause: cause is Map ? ServerError.fromRpc(cause) : null,
+      statementIndex: statementIndex,
     );
   }
 

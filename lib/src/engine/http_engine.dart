@@ -65,6 +65,9 @@ class HttpEngine implements Engine {
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
 
   @override
+  bool get supportsStreaming => false;
+
+  @override
   bool get supportsLiveQueries => false;
 
   @override
@@ -105,6 +108,11 @@ class HttpEngine implements Engine {
       _statusController.add(ConnectionStatus.disconnected);
     }
   }
+
+  @override
+  Stream<Object?> rpcStream(String method, List<Object?> params,
+          {Uuid? session, Uuid? txn}) =>
+      throw const UnsupportedFeatureError('streaming');
 
   @override
   bool get supportsSessions => false;

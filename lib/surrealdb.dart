@@ -24,4 +24,5 @@ export 'src/types/auth.dart';
 export 'src/types/connection.dart';
 export 'src/types/live.dart';
 export 'src/types/patch.dart';
+export 'src/types/query_frame.dart';
 export 'src/value/value.dart';

@@ -1,3 +1,4 @@
+import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
@@ -24,6 +25,17 @@ abstract class Engine {
   /// A [session] runs it in that attached session and a [txn] inside that
   /// transaction.
   Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn});
+
+  /// Whether this engine can stream replies with [rpcStream].
+  bool get supportsStreaming;
+
+  /// Sends an RPC call whose reply arrives as several messages, such as
+  /// `query_stream`, and emits the result of each one. The stream closes
+  /// after a result that is a map with `stream: end`, and fails on an error
+  /// reply. Cancelling the subscription early cancels the call on the
+  /// server. Engines that cannot stream throw [UnsupportedFeatureError].
+  Stream<Object?> rpcStream(String method, List<Object?> params,
       {Uuid? session, Uuid? txn});
 
   /// Whether this engine can attach sessions and run transactions, which

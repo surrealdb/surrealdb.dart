@@ -39,6 +39,13 @@ class WebSocketEngine implements Engine {
   final ReconnectOptions _reconnect;
   final Duration? _requestTimeout;
   final _pending = <String, Completer<Object?>>{};
+  final _streams = <String, StreamController<Object?>>{};
+
+  /// Streams cancelled on the server and not yet ended there, by request id.
+  final _cancelling = <String, Completer<void>>{};
+
+  /// Timers for streams still waiting for their first reply, by request id.
+  final _firstFrame = <String, Timer>{};
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _liveController = StreamController<LiveMessage>.broadcast();
 
@@ -80,6 +87,9 @@ class WebSocketEngine implements Engine {
 
   @override
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
+
+  @override
+  bool get supportsStreaming => true;
 
   @override
   bool get supportsLiveQueries => true;
@@ -186,6 +196,98 @@ class WebSocketEngine implements Engine {
     return _call(method, params, session: session, txn: txn);
   }
 
+  @override
+  Stream<Object?> rpcStream(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) {
+    String? id;
+    late final StreamController<Object?> controller;
+    controller = StreamController<Object?>(
+      onListen: () {
+        final channel = _channel;
+        if (channel == null || _status != ConnectionStatus.connected) {
+          controller
+            ..addError(const ConnectionUnavailableError())
+            ..close();
+          return;
+        }
+        final requestId = _protocol.nextId();
+        try {
+          final payload = _protocol.encodeRequest(requestId, method, params,
+              session: session, txn: txn);
+          _streams[requestId] = controller;
+          channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+        } catch (error, stackTrace) {
+          // Not sent, for example because a binding cannot be encoded.
+          _streams.remove(requestId);
+          controller
+            ..addError(error, stackTrace)
+            ..close();
+          return;
+        }
+        id = requestId;
+        final timeout = _requestTimeout;
+        if (timeout != null) {
+          // Only the wait for the first reply is limited: a stream may then
+          // run for as long as its query does.
+          _firstFrame[requestId] = Timer(timeout, () {
+            _firstFrame.remove(requestId);
+            if (_streams.remove(requestId) == null) return;
+            // The error comes once the query has stopped, so that a
+            // transaction is not committed while it still runs.
+            unawaited(_cancelOnServer(requestId, session).whenComplete(() {
+              if (controller.isClosed) return;
+              controller
+                ..addError(RequestTimeoutError(method, timeout))
+                ..close();
+            }));
+          });
+        }
+      },
+      onCancel: () {
+        final requestId = id;
+        if (requestId == null) return null;
+        _firstFrame.remove(requestId)?.cancel();
+        if (_streams.remove(requestId) == null || _channel == null) {
+          // A stream that timed out may still be stopping on the server.
+          return _cancelling[requestId]?.future;
+        }
+        // Cancelled before the end, so stop the work on the server too, and
+        // wait until it has stopped: a stream in a transaction is still
+        // using it until then, so committing earlier would cut it short.
+        return _cancelOnServer(requestId, session);
+      },
+    );
+    return controller.stream;
+  }
+
+  /// Cancels the stream [requestId] on the server, and completes once the
+  /// server has ended it.
+  ///
+  /// If the server refuses the cancel, or does not end the stream within the
+  /// request timeout, the query may still be running. The socket is then
+  /// dropped, which stops it, and the usual reconnect follows.
+  Future<void> _cancelOnServer(String requestId, Uuid? session) {
+    final channel = _channel;
+    final ended = Completer<void>();
+    _cancelling[requestId] = ended;
+    void abandon() {
+      // Once the stream has ended the query has stopped, so a cancel that
+      // fails because it came too late is harmless.
+      if (_cancelling[requestId] != ended) return;
+      if (channel != null) _resetChannel(channel);
+      _ended(requestId);
+    }
+
+    unawaited(_call('query_cancel', [requestId], session: session)
+        .then((_) {}, onError: (_) => abandon()));
+    final timeout = _requestTimeout;
+    return timeout == null
+        ? ended.future
+        : ended.future.timeout(timeout, onTimeout: abandon);
+  }
+
+  void _ended(String requestId) => _cancelling.remove(requestId)?.complete();
+
   /// Sends a request on the current socket. Unlike [rpc] this does not need
   /// the connection to be fully restored, so it is used to replay the session.
   Future<Object?> _call(String method, List<Object?> params,
@@ -194,14 +296,19 @@ class WebSocketEngine implements Engine {
     if (channel == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
     final completer = Completer<Object?>();
-    _pending[id] = completer;
     final payload =
         _protocol.encodeRequest(id, method, params, session: session, txn: txn);
     // A variable is kept as it was sent, decoded from the request itself, so
     // that later changes to the caller's objects cannot change what a
     // reconnect replays.
     final sent = method == 'let' ? _paramsOf(payload) : params;
-    channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+    _pending[id] = completer;
+    try {
+      channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+    } catch (_) {
+      _pending.remove(id);
+      rethrow;
+    }
     final timeout = _requestTimeout;
     final Object? result;
     if (timeout == null) {
@@ -264,6 +371,27 @@ class WebSocketEngine implements Engine {
           completer.completeError(error);
         } else {
           completer.complete(result);
+        }
+      case RpcResponse(:final id, :final result, :final error)
+          when _streams.containsKey(id):
+        _firstFrame.remove(id)?.cancel();
+        final controller = _streams[id]!;
+        if (error != null) {
+          _streams.remove(id);
+          controller
+            ..addError(error)
+            ..close();
+        } else {
+          controller.add(result);
+          if (result is Map && result['stream'] == 'end') {
+            _streams.remove(id);
+            controller.close();
+          }
+        }
+      case RpcResponse(:final id, :final result, :final error)
+          when _cancelling.containsKey(id):
+        if (error != null || (result is Map && result['stream'] == 'end')) {
+          _ended(id);
         }
       case RpcNotification(:final message):
         if (!_liveController.isClosed) _liveController.add(message);
@@ -439,6 +567,21 @@ class WebSocketEngine implements Engine {
   }
 
   void _failPending(Object error) {
+    for (final timer in _firstFrame.values) {
+      timer.cancel();
+    }
+    _firstFrame.clear();
+    for (final ended in _cancelling.values) {
+      ended.complete();
+    }
+    _cancelling.clear();
+    final streams = List.of(_streams.values);
+    _streams.clear();
+    for (final controller in streams) {
+      controller
+        ..addError(error)
+        ..close();
+    }
     final pending = List.of(_pending.values);
     _pending.clear();
     for (final completer in pending) {
