@@ -76,6 +76,9 @@ class Surreal {
   AnyAuth? _renewWith;
   Timer? _renewalTimer;
 
+  /// How many renewals in a row have failed, for backing off.
+  var _renewalFailures = 0;
+
   /// Completes when the automatic renewal under way, if any, has finished.
   Future<void>? _renewing;
 
@@ -523,6 +526,7 @@ class Surreal {
   void _onTokensChanged() {
     _renewalTimer?.cancel();
     _renewalTimer = null;
+    _renewalFailures = 0;
     if (!_authController.isClosed) _authController.add(tokens);
     _scheduleRenewal();
   }
@@ -563,19 +567,36 @@ class Surreal {
       if (_session.token != token) return;
       if (error is NotAllowedError) {
         // The refresh token or credentials were rejected, so retrying will
-        // not help. The session keeps its access token until it expires.
-        _session.setTokens(token, null);
+        // not help. The session keeps its access token until it expires,
+        // and is signed out then.
+        if (_session.refreshToken != null) {
+          _session.setTokens(token, null);
+        } else {
+          _renewWith = null;
+        }
+        if (_session.token == token && _renewWith == null) {
+          _renewalTimer?.cancel();
+          _renewalTimer = Timer(_untilExpiry(expiry), () {
+            if (_session.token == token) _session.setTokens(null, null);
+          });
+        }
         return;
       }
-      // Try again shortly while the token is still valid, for example once
-      // a dropped connection is back.
-      if (expiry.isAfter(DateTime.now().toUtc())) {
-        _scheduleRenewal(after: const Duration(seconds: 5));
-      }
+      // Try again, backing off, for example once a dropped connection is
+      // back. This goes on after the access token expires, as the refresh
+      // token or credentials may still work.
+      final delay = Duration(seconds: 5 << _renewalFailures.clamp(0, 4));
+      _renewalFailures++;
+      _scheduleRenewal(after: delay);
     } finally {
       _renewing = null;
       done.complete();
     }
+  }
+
+  static Duration _untilExpiry(DateTime expiry) {
+    final left = expiry.difference(DateTime.now().toUtc());
+    return left.isNegative ? Duration.zero : left;
   }
 
   /// Resets the session: signs out, clears the namespace, database and every

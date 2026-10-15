@@ -216,6 +216,7 @@ class WebSocketEngine implements Engine {
     'let',
     'unset',
     'reset',
+    'refresh',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -344,10 +345,14 @@ class WebSocketEngine implements Engine {
         // Any other failure fails the attempt, which is tried again.
         if (!rejectsAuthentication(error)) rethrow;
         // The server rejected the token, and the refresh token if there was
-        // one, for example because they expired. The connection itself is
-        // fine, so carry on without them rather than failing every attempt.
-        session.setTokens(null, null);
+        // one, for example because they expired. The driver may sign in
+        // again; if that fails for now, the attempt fails with the tokens
+        // kept, so the next one tries again.
+        final rejected = session.token;
         await _onAuthenticationLost?.call(error, _call);
+        // The connection itself is fine, so otherwise carry on without them
+        // rather than failing every attempt.
+        if (session.token == rejected) session.setTokens(null, null);
       }
     }
     if (!known && (namespace is String || database is String)) {
