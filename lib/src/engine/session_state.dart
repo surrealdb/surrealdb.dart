@@ -10,6 +10,19 @@ import '../value/value.dart';
 class SessionState {
   String? namespace;
   String? database;
+
+  /// Whether a null [namespace] or [database] was cleared, rather than never
+  /// known: a `use` that kept a value the client did not know leaves it null
+  /// too.
+  bool namespaceCleared = false;
+  bool databaseCleared = false;
+
+  /// The namespace to select again after a reconnect: NONE, which keeps
+  /// whatever the new session has, when it is not known.
+  Object? get replayNamespace => namespace ?? (namespaceCleared ? null : none);
+
+  /// The database to select again after a reconnect, like [replayNamespace].
+  Object? get replayDatabase => database ?? (databaseCleared ? null : none);
   String? token;
   final Map<String, Object?> variables = {};
 
@@ -56,17 +69,26 @@ class SessionState {
     final db = params.length > 1 ? params[1] : none;
     if (ns is! SurrealNone) {
       namespace = ns as String?;
-      if (ns == null) database = null;
+      namespaceCleared = ns == null;
+      if (ns == null) {
+        database = null;
+        databaseCleared = true;
+      }
     }
-    if (db is! SurrealNone) database = db as String?;
+    if (db is! SurrealNone) {
+      database = db as String?;
+      databaseCleared = db == null;
+    }
     if (result is Map) {
       if (result.containsKey('namespace')) {
         final value = result['namespace'];
         namespace = value is String ? value : null;
+        namespaceCleared = namespace == null;
       }
       if (result.containsKey('database')) {
         final value = result['database'];
         database = value is String ? value : null;
+        databaseCleared = database == null;
       }
     }
   }
@@ -75,6 +97,8 @@ class SessionState {
   void clear() {
     namespace = null;
     database = null;
+    namespaceCleared = true;
+    databaseCleared = true;
     token = null;
     variables.clear();
   }
@@ -83,6 +107,8 @@ class SessionState {
   SessionState copy() => SessionState()
     ..namespace = namespace
     ..database = database
+    ..namespaceCleared = namespaceCleared
+    ..databaseCleared = databaseCleared
     ..token = token
     ..variables.addAll(variables);
 

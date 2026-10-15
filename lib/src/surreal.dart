@@ -376,7 +376,8 @@ class Surreal {
     final registrations = List.of(_liveByUuid.values);
     _liveByUuid.clear();
     for (final registration in registrations) {
-      await registration.query.dispose();
+      // Not awaited: a paused listener would hold up the rest.
+      unawaited(registration.query.dispose());
     }
   }
 
