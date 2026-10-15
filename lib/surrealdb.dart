@@ -13,6 +13,10 @@ export 'src/protocol/codec.dart' show SurrealCodec, SurrealFormat;
 export 'src/surreal.dart'
     show
         Surreal,
+        SurrealQueryable,
+        SurrealSession,
+        SurrealSessionMethods,
+        SurrealTransaction,
         isSupportedServerVersion,
         maximumServerVersion,
         minimumServerVersion;

@@ -557,3 +557,18 @@ class LiveQueryLostError extends SurrealError {
   /// The id of the lost live query.
   final Object id;
 }
+
+/// Thrown when a session is used after it was closed, or after the client
+/// that attached it closed.
+class InvalidSessionError extends SurrealError {
+  InvalidSessionError(this.id) : super('The session $id has been closed');
+
+  /// The id of the closed session.
+  final Object id;
+}
+
+/// Thrown when a transaction is used after it was committed or cancelled.
+class TransactionClosedError extends SurrealError {
+  const TransactionClosedError()
+      : super('The transaction has already been committed or cancelled');
+}

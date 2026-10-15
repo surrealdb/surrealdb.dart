@@ -1,5 +1,7 @@
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
+import 'session_state.dart';
 
 /// Transport that carries RPC calls to a SurrealDB instance.
 ///
@@ -13,7 +15,22 @@ abstract class Engine {
   Future<void> close();
 
   /// Sends an RPC call and completes with its result, or throws on error.
-  Future<Object?> rpc(String method, List<Object?> params);
+  /// A [session] runs it in that attached session and a [txn] inside that
+  /// transaction.
+  Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn});
+
+  /// Whether this engine can attach sessions and run transactions, which
+  /// need a connection that outlives a single request.
+  bool get supportsSessions;
+
+  /// Starts tracking the [state] of the attached session [id], so its
+  /// requests keep it up to date and a reconnect attaches it again and
+  /// replays it.
+  void trackSession(Uuid id, SessionState state);
+
+  /// Stops tracking the attached session [id].
+  void untrackSession(Uuid id);
 
   /// The current connection status.
   ConnectionStatus get status;

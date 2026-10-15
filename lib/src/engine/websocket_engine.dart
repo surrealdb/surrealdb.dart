@@ -8,6 +8,7 @@ import '../internal/jwt.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
 import 'session_state.dart';
@@ -42,8 +43,22 @@ class WebSocketEngine implements Engine {
   var _intentionalClose = false;
   var _reconnecting = false;
 
-  /// The session state, replayed after a reconnect.
+  /// The state of the connection's default session, replayed after a
+  /// reconnect.
   final SessionState _session;
+
+  /// The state of each attached session, by id, attached again and replayed
+  /// after a reconnect.
+  final Map<Uuid, SessionState> _attached = {};
+
+  @override
+  bool get supportsSessions => true;
+
+  @override
+  void trackSession(Uuid id, SessionState state) => _attached[id] = state;
+
+  @override
+  void untrackSession(Uuid id) => _attached.remove(id);
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
@@ -138,22 +153,25 @@ class WebSocketEngine implements Engine {
   }
 
   @override
-  Future<Object?> rpc(String method, List<Object?> params) async {
+  Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
     if (_status != ConnectionStatus.connected) {
       throw const ConnectionUnavailableError();
     }
-    return _call(method, params);
+    return _call(method, params, session: session, txn: txn);
   }
 
   /// Sends a request on the current socket. Unlike [rpc] this does not need
   /// the connection to be fully restored, so it is used to replay the session.
-  Future<Object?> _call(String method, List<Object?> params) async {
+  Future<Object?> _call(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
     final channel = _channel;
     if (channel == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
     final completer = Completer<Object?>();
     _pending[id] = completer;
-    final payload = _protocol.encodeRequest(id, method, params);
+    final payload =
+        _protocol.encodeRequest(id, method, params, session: session, txn: txn);
     channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
     final timeout = _requestTimeout;
     final Object? result;
@@ -166,7 +184,8 @@ class WebSocketEngine implements Engine {
         throw RequestTimeoutError(method, timeout);
       });
     }
-    _session.apply(method, params, result);
+    (session == null ? _session : _attached[session])
+        ?.apply(method, params, result);
     return result;
   }
 
@@ -234,32 +253,38 @@ class WebSocketEngine implements Engine {
     }
   }
 
+  /// Replays the default session, then attaches and replays every attached
+  /// session.
   Future<void> _restoreSession() async {
-    final session = _session;
-    if (session.namespace != null || session.database != null) {
-      await _call('use', [session.namespace, session.database]);
+    await _restoreState(_session, null);
+    for (final MapEntry(key: id, value: state) in _attached.entries.toList()) {
+      await _call('attach', const [], session: id);
+      await _restoreState(state, id);
     }
-    for (final MapEntry(:key, :value) in session.variables.entries) {
-      await _call('let', [key, value]);
+  }
+
+  Future<void> _restoreState(SessionState state, Uuid? session) async {
+    if (state.namespace != null || state.database != null) {
+      await _call('use', [state.namespace, state.database], session: session);
     }
-    final token = session.token;
+    for (final MapEntry(:key, :value) in state.variables.entries.toList()) {
+      await _call('let', [key, value], session: session);
+    }
+    final token = state.token;
     if (token != null) {
-      final refresh = session.refreshToken;
+      final refresh = state.refreshToken;
       final expiry = tokenExpiry(token);
       final expired = expiry != null && !expiry.isAfter(DateTime.now().toUtc());
+      final pair = {'access': token, 'refresh': refresh};
       try {
         if (expired && refresh != null) {
-          await _call('refresh', [
-            {'access': token, 'refresh': refresh},
-          ]);
+          await _call('refresh', [pair], session: session);
         } else {
           try {
-            await _call('authenticate', [token]);
+            await _call('authenticate', [token], session: session);
           } on ResponseError {
             if (refresh == null) rethrow;
-            await _call('refresh', [
-              {'access': token, 'refresh': refresh},
-            ]);
+            await _call('refresh', [pair], session: session);
           }
         }
       } on ResponseError catch (error) {
@@ -267,8 +292,8 @@ class WebSocketEngine implements Engine {
         // one, for example because they expired. The connection itself is
         // fine, so carry on without authentication rather than failing every
         // attempt.
-        session.setTokens(null, null);
-        _onAuthenticationLost?.call(error);
+        state.setTokens(null, null);
+        if (session == null) _onAuthenticationLost?.call(error);
       }
     }
   }

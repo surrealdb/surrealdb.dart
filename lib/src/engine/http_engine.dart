@@ -6,6 +6,7 @@ import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
 import 'session_state.dart';
@@ -88,8 +89,29 @@ class HttpEngine implements Engine {
   }
 
   @override
-  Future<Object?> rpc(String method, List<Object?> params) async {
+  bool get supportsSessions => false;
+
+  @override
+  void trackSession(Uuid id, SessionState state) =>
+      throw const UnsupportedFeatureError('sessions');
+
+  @override
+  void untrackSession(Uuid id) {}
+
+  @override
+  Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
+    if (session != null) throw const UnsupportedFeatureError('sessions');
+    if (txn != null) throw const UnsupportedFeatureError('transactions');
     switch (method) {
+      case 'attach':
+      case 'detach':
+      case 'sessions':
+        throw const UnsupportedFeatureError('sessions');
+      case 'begin':
+      case 'commit':
+      case 'cancel':
+        throw const UnsupportedFeatureError('transactions');
       // Each HTTP request is its own server-side session, so session state is
       // kept here and sent with every request instead.
       case 'use':
