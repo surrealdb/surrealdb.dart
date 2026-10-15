@@ -124,6 +124,37 @@ void main() {
       expect(changes.last?.refresh, 'refresh-2');
     });
 
+    test('a renewal under way cannot undo a later sign-out', () async {
+      FakeRequest? held;
+      server.handler = (r) => switch (r.method) {
+            'signin' => issueTokens(r, const Duration(seconds: 2)),
+            'refresh' => () {
+                held = r;
+                return const FakeSilence();
+              }(),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await connect(margin: const Duration(seconds: 1));
+      await db.signin(const RootAuth(username: 'u', password: 'p'));
+      await eventually(() => held != null, timeout: const Duration(seconds: 3));
+
+      final signedOut = db.invalidate();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // The sign-out waits for the renewal rather than racing it.
+      expect(server.methods, isNot(contains('invalidate')));
+      held!.socket.add(const CborCodec().encode({
+        'id': held!.id,
+        'result': {
+          'access': fakeJwt(const Duration(hours: 1), id: 'late'),
+          'refresh': 'refresh-late',
+        },
+      }));
+      await signedOut;
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(server.methods.last, 'invalidate');
+      expect(db.tokens, isNull);
+    });
+
     test('renews by signing in again when there is no refresh token', () async {
       server.handler = (r) => r.method == 'signin'
           ? FakeResult(fakeJwt(const Duration(seconds: 1)))

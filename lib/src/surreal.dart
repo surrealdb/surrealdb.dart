@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
 import 'engine/session_state.dart';
@@ -18,6 +19,7 @@ import 'types/patch.dart';
 import 'value/value.dart';
 
 part 'queryable.dart';
+part 'renewal.dart';
 part 'session.dart';
 part 'transaction.dart';
 
@@ -72,8 +74,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   // Token renewal.
   var _renewTokens = true;
   var _tokenExpiryMargin = const Duration(seconds: 60);
-  AnyAuth? _renewWith;
-  Timer? _renewalTimer;
+  @override
+  late final _TokenRenewal _renewal =
+      _TokenRenewal(this, _session, null, onError: (error, stackTrace) {
+    if (!_authController.isClosed) _authController.addError(error, stackTrace);
+  });
   final _authController = StreamController<Tokens?>.broadcast();
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
@@ -90,9 +95,6 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
 
   @override
   SessionState get _state => _session;
-
-  @override
-  void _authChanging() => _renewWith = null;
 
   /// Emits the new [tokens] whenever they change: after signing in, a
   /// refresh, an automatic renewal or a reconnect that had to refresh. Emits
@@ -149,6 +151,15 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
         await close();
         rethrow;
       }
+      // Servers before 3.0 have no set type and reject its CBOR tag.
+      final codec = engine.codec;
+      final major = _parseVersion(_version ?? '')?.first;
+      if (codec is CborCodec &&
+          !codec.setsAsArrays &&
+          major != null &&
+          major < 3) {
+        engine.codec = const CborCodec(setsAsArrays: true);
+      }
     }
     if (options.namespace != null || options.database != null) {
       await use(
@@ -159,7 +170,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     final credentials = options.authentication;
     if (credentials != null) {
       // Without a refresh token, renewal signs in again with these.
-      _renewWith = credentials;
+      _renewal.credentials = credentials;
       await _rpc('signin', [credentials.toJson()]);
     } else if (options.token != null) {
       await authenticate(options.token!, refreshToken: options.refreshToken);
@@ -202,6 +213,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     }
     for (final session in _attached.values) {
       session._closed = true;
+      session._renewal.stop();
     }
     _attached.clear();
     final engine = _engine;
@@ -212,10 +224,8 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     if (engine != null) _statusController.add(ConnectionStatus.disconnected);
     _httpClient?.close();
     _httpClient = null;
-    _renewWith = null;
-    _renewalTimer?.cancel();
-    _renewalTimer = null;
     _session.clear();
+    _renewal.cancel();
     _version = null;
   }
 
@@ -256,6 +266,13 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   // Sessions
   // ---------------------------------------------------------------------------
 
+  /// Whether a `use` call can carry NONE to keep a value. A JSON WebSocket
+  /// cannot; over HTTP the client applies `use` itself.
+  bool get _canSendNone {
+    final engine = _engine;
+    return engine is! WebSocketEngine || engine.codec is CborCodec;
+  }
+
   /// Attaches a new, empty session to the connection: no namespace,
   /// database, variables or authentication. See [SurrealSession].
   Future<SurrealSession> newSession() => _attachSession();
@@ -276,6 +293,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     await _rpc('attach', const [], session: id);
     engine.trackSession(id, state);
     final session = SurrealSession._(this, id, state);
+    state.onTokensChanged = session._renewal.reschedule;
     _attached[id] = session;
     if (copyOf != null) {
       try {
@@ -307,53 +325,8 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
 
   /// Reschedules renewal and tells listeners whenever the tokens change.
   void _onTokensChanged() {
-    _renewalTimer?.cancel();
-    _renewalTimer = null;
     if (!_authController.isClosed) _authController.add(tokens);
-    _scheduleRenewal();
-  }
-
-  /// Renews the session [_tokenExpiryMargin] before its access token
-  /// expires: with the refresh token when there is one, otherwise by signing
-  /// in again with the credentials given to [connect].
-  void _scheduleRenewal({Duration? after}) {
-    final token = _session.token;
-    if (!_renewTokens || token == null) return;
-    if (_session.refreshToken == null && _renewWith == null) return;
-    final expiry = tokenExpiry(token);
-    if (expiry == null) return;
-    final delay = after ?? renewalDelay(expiry, _tokenExpiryMargin);
-    _renewalTimer = Timer(delay, () => _renew(token, expiry));
-  }
-
-  Future<void> _renew(String token, DateTime expiry) async {
-    _renewalTimer = null;
-    // The tokens changed since this renewal was scheduled.
-    if (_session.token != token || _engine == null) return;
-    try {
-      final credentials = _renewWith;
-      if (_session.refreshToken != null) {
-        await refresh();
-      } else if (credentials != null) {
-        await _rpc('signin', [credentials.toJson()]);
-      }
-    } catch (error, stackTrace) {
-      if (!_authController.isClosed) {
-        _authController.addError(error, stackTrace);
-      }
-      if (_session.token != token) return;
-      if (error is NotAllowedError) {
-        // The refresh token or credentials were rejected, so retrying will
-        // not help. The session keeps its access token until it expires.
-        _session.setTokens(token, null);
-        return;
-      }
-      // Try again shortly while the token is still valid, for example once
-      // a dropped connection is back.
-      if (expiry.isAfter(DateTime.now().toUtc())) {
-        _scheduleRenewal(after: const Duration(seconds: 5));
-      }
-    }
+    _renewal.reschedule();
   }
 
   // ---------------------------------------------------------------------------

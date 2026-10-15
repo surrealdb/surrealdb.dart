@@ -1,3 +1,4 @@
+import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
 import '../value/value.dart';
@@ -10,6 +11,11 @@ import 'session_state.dart';
 abstract class Engine {
   /// Opens the connection.
   Future<void> open(Uri url, {Duration timeout = const Duration(seconds: 30)});
+
+  /// The codec requests and replies are encoded with. It can be replaced by
+  /// one of the same format, for example once the server version is known.
+  SurrealCodec get codec;
+  set codec(SurrealCodec value);
 
   /// Closes the connection and releases any resources.
   Future<void> close();

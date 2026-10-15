@@ -1,4 +1,7 @@
+import 'dart:convert' show jsonEncode, utf8;
+
 import 'package:surrealdb/src/engine/rpc.dart';
+import 'package:surrealdb/src/json/codec.dart';
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -75,5 +78,37 @@ void main() {
     final incoming = protocol.decodeIncoming(bytes) as RpcNotification;
     expect(incoming.message.recordId, const RecordId('person', 'tobie'));
     expect(incoming.message.value, isA<List<Object?>>());
+  });
+
+  test('reads a JSON diff notification record id from its string', () {
+    final json = RpcProtocol(const JsonCodec());
+    final bytes = utf8.encode(jsonEncode({
+      'result': {
+        'id': '01234567-89ab-4def-8123-456789abcdef',
+        'action': 'UPDATE',
+        'record': 'person:diff',
+        'result': [
+          {'op': 'replace', 'path': '/age', 'value': 33},
+        ],
+      },
+    }));
+    final incoming = json.decodeIncoming(bytes) as RpcNotification;
+    expect(incoming.message.recordId, const RecordId('person', 'diff'));
+  });
+
+  test('parses the string forms of a record id', () {
+    expect(parseRecordId('person:tobie'), const RecordId('person', 'tobie'));
+    expect(parseRecordId('person:1'), const RecordId('person', 1));
+    expect(parseRecordId('person:-5'), const RecordId('person', -5));
+    expect(parseRecordId('person:`a b`'), const RecordId('person', 'a b'));
+    expect(parseRecordId(r'person:`a\`b`'), const RecordId('person', 'a`b'));
+    expect(parseRecordId('person:⟨a b⟩'), const RecordId('person', 'a b'));
+    expect(parseRecordId('`my table`:x'), const RecordId('my table', 'x'));
+    expect(parseRecordId('person:`12345678901234567890`'),
+        const RecordId('person', '12345678901234567890'));
+    expect(parseRecordId("person:u'018f1c8e-7d2a-7cc0-9a1b-1234567890ab'"),
+        RecordId('person', Uuid('018f1c8e-7d2a-7cc0-9a1b-1234567890ab')));
+    expect(parseRecordId("person:[1, 'a']"), isNull);
+    expect(parseRecordId('person'), isNull);
   });
 }

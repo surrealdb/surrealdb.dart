@@ -69,6 +69,23 @@ void main() {
       await db.close();
     });
 
+    for (final (version, tagged) in [
+      ('surrealdb-2.3.0', false),
+      ('surrealdb-3.0.0', true),
+    ]) {
+      test('a set is ${tagged ? 'a set' : 'an array'} for $version', () async {
+        server.handler = versionIs(version);
+        final db = Surreal();
+        await db.connect(server.url);
+        await db.query(r'RETURN $s', bindings: {
+          's': {1, 2},
+        });
+        final sent = (server.requests.last.params[1] as Map)['s'];
+        expect(sent, tagged ? isA<Set<Object?>>() : isA<List<Object?>>());
+        await db.close();
+      });
+    }
+
     test('can be turned off', () async {
       server.handler = versionIs('surrealdb-5.0.0');
       final db = Surreal();

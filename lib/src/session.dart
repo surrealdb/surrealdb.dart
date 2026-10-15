@@ -16,8 +16,17 @@ mixin SurrealSessionMethods on SurrealQueryable {
 
   SessionState get _state;
 
+  /// Throws when the session can no longer be used.
+  void _checkOpen() {}
+
+  /// Renews the session's tokens before they expire.
+  _TokenRenewal get _renewal;
+
   /// Called before a call that replaces the session's authentication.
-  void _authChanging() {}
+  Future<void> _authChanging() async {
+    _renewal.credentials = null;
+    await _renewal.settled();
+  }
 
   @override
   Future<Object?> _call(String method, [List<Object?> params = const []]) =>
@@ -68,25 +77,37 @@ mixin SurrealSessionMethods on SurrealQueryable {
     // A value that stays the same is sent as it is when it is known, so that
     // codecs without NONE (JSON) do not clear it, and as NONE otherwise.
     final clearNamespace = !keepNamespace && namespace == null;
+    Object? currentNamespace = _state.namespace ?? none;
+    Object? currentDatabase = _state.database ?? none;
+    final unknown = (keepNamespace && currentNamespace is SurrealNone) ||
+        (!clearNamespace && keepDatabase && currentDatabase is SurrealNone);
+    if (unknown && !_client._canSendNone) {
+      // NONE would arrive as null and clear the value, so ask the server
+      // what it has selected and send that back.
+      final [selected] = await query('RETURN [session::ns(), session::db()]');
+      final [ns, db] = selected! as List<Object?>;
+      if (currentNamespace is SurrealNone) currentNamespace = ns;
+      if (currentDatabase is SurrealNone) currentDatabase = db;
+    }
     await _call('use', [
-      keepNamespace ? (_state.namespace ?? none) : namespace,
+      keepNamespace ? currentNamespace : namespace,
       clearNamespace
           ? null
           : keepDatabase
-              ? (_state.database ?? none)
+              ? currentDatabase
               : database,
     ]);
   }
 
   /// Signs up a new record access user and returns the issued tokens.
   Future<Tokens> signup(AccessRecordAuth auth) async {
-    _authChanging();
+    await _authChanging();
     return _tokensFrom(await _call('signup', [auth.toJson()]));
   }
 
   /// Signs in with the given credentials and returns the issued tokens.
   Future<Tokens> signin(AnyAuth auth) async {
-    _authChanging();
+    await _authChanging();
     return _tokensFrom(await _call('signin', [auth.toJson()]));
   }
 
@@ -96,7 +117,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// session: straight away when [token] has already expired or is
   /// rejected, and automatically before it expires.
   Future<void> authenticate(String token, {String? refreshToken}) async {
-    _authChanging();
+    await _authChanging();
     final expiry = tokenExpiry(token);
     final expired = expiry != null && !expiry.isAfter(DateTime.now().toUtc());
     if (refreshToken != null && expired) {
@@ -121,6 +142,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// the new one. Needs SurrealDB 3.0 or later and an access method defined
   /// `WITH REFRESH`.
   Future<Tokens> refresh([Tokens? tokens]) async {
+    await _renewal.settled();
     final current = tokens ?? this.tokens;
     if (current?.refresh == null) {
       throw const AuthenticationError(
@@ -133,6 +155,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// own [tokens] unless others are given. The session stays authenticated
   /// until its access token expires, but can no longer be refreshed.
   Future<void> revoke([Tokens? tokens]) async {
+    await _renewal.settled();
     final current = tokens ?? this.tokens;
     final refreshToken = current?.refresh;
     if (refreshToken == null) {
@@ -146,7 +169,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
 
   /// Invalidates the session, signing out.
   Future<void> invalidate() async {
-    _authChanging();
+    await _authChanging();
     await _call('invalidate');
   }
 
@@ -154,7 +177,7 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// variable, cancels its transactions and stops its live queries. The
   /// connection stays open.
   Future<void> reset() async {
-    _authChanging();
+    await _authChanging();
     await _call('reset');
     // The server has stopped every live query of the session.
     await _client._disposeLiveQueries(_sessionId);
@@ -202,11 +225,16 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// it after a reconnect: its stream then gets a [LiveQueryLostError] and
   /// closes. Use [live] for a query that survives reconnects.
   LiveQuery liveOf(Uuid id) {
+    _checkOpen();
     final engine = _client._engine;
     if (engine == null) throw const ConnectionUnavailableError();
     if (!engine.supportsLiveQueries) {
       throw const UnsupportedFeatureError('live');
     }
+    // The handle for a query that is already registered is shared, so that
+    // killing one does not leave another open.
+    final existing = _client._liveByUuid[id.toString()];
+    if (existing != null) return existing.query;
     return _client._registerLive(id, _sessionId, null, false);
   }
 
@@ -233,8 +261,10 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Starts a new session on the same connection that begins as a copy of
   /// this one: the same namespace, database, variables and authentication.
   /// From then on the two are independent.
-  Future<SurrealSession> forkSession() =>
-      _client._attachSession(copyOf: _state.copy());
+  Future<SurrealSession> forkSession() async {
+    _checkOpen();
+    return _client._attachSession(copyOf: _state.copy());
+  }
 }
 
 /// A session attached to the client's connection, alongside the default
@@ -259,6 +289,9 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
   /// The id of this session on the server.
   final Uuid id;
 
+  @override
+  late final _TokenRenewal _renewal = _TokenRenewal(_client, _state, id);
+
   var _closed = false;
 
   @override
@@ -268,8 +301,13 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
   bool get isClosed => _closed;
 
   @override
-  Future<Object?> _call(String method, [List<Object?> params = const []]) {
+  void _checkOpen() {
     if (_closed) throw InvalidSessionError(id);
+  }
+
+  @override
+  Future<Object?> _call(String method, [List<Object?> params = const []]) {
+    _checkOpen();
     return super._call(method, params);
   }
 
@@ -278,6 +316,7 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _renewal.stop();
     _client._attached.remove(id);
     _client._engine?.untrackSession(id);
     await _client._disposeLiveQueries(id);
