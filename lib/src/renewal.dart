@@ -122,7 +122,7 @@ final class _TokenRenewal {
     } catch (error, stackTrace) {
       onError?.call(error, stackTrace);
       if (_state.token != token) return;
-      if (error is NotAllowedError) {
+      if (rejectsAuthentication(error)) {
         // The refresh token or credentials were rejected, so retrying will
         // not help. The session keeps its access token until it expires,
         // and is signed out then.
