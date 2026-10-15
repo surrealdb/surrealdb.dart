@@ -363,7 +363,12 @@ class Surreal {
   /// await db.use(namespace: null);   // clear both
   /// ```
   Future<void> use(
-      {String? namespace = _unchanged, String? database = _unchanged}) async {
+          {String? namespace = _unchanged, String? database = _unchanged}) =>
+      // After a renewal under way, which selects what its new token names,
+      // so that this selection is the one that stays.
+      _changingAuth(() => _use(namespace, database), keepCredentials: true);
+
+  Future<void> _use(String? namespace, String? database) async {
     final keepNamespace = identical(namespace, _unchanged);
     final keepDatabase = identical(database, _unchanged);
     if (!keepNamespace &&
@@ -624,19 +629,26 @@ class Surreal {
       return;
     }
     try {
-      await use(
-        namespace: namespace is SurrealNone ? _unchanged : namespace as String?,
-        database: database is SurrealNone ? _unchanged : database as String?,
+      await _use(
+        namespace is SurrealNone ? _unchanged : namespace as String?,
+        database is SurrealNone ? _unchanged : database as String?,
       );
+    } on ResponseError {
+      // Refused, so the session stays as signing in left it, which is what
+      // it reports.
     } on SurrealError {
-      // The session stays as signing in left it, which is what it reports.
+      // The connection is down, or was dropped because the call timed out.
+      // Keep the selection wanted, which the reconnect then makes.
+      _session.applyUse([namespace, database]);
     }
   }
 
-  /// A deep copy of [value], made by encoding and decoding it.
-  static Map<String, Object?> _copyOf(Map<String, Object?> value) =>
-      (const CborCodec().decode(const CborCodec().encode(value)) as Map)
-          .cast<String, Object?>();
+  /// A deep copy of [value], made by encoding and decoding it with the
+  /// codec requests are sent with.
+  Map<String, Object?> _copyOf(Map<String, Object?> value) {
+    final codec = _engine?.codec ?? const CborCodec();
+    return (codec.decode(codec.encode(value)) as Map).cast<String, Object?>();
+  }
 
   static Duration _untilExpiry(DateTime expiry) {
     final left = expiry.difference(DateTime.now().toUtc());
