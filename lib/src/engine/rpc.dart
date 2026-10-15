@@ -157,7 +157,7 @@ class _SurqlReader {
     if (number != null && !_isIdentChar(_peekAt(number.end - _i))) {
       _i = number.end;
       final digits = number.group(0)!;
-      return int.tryParse(digits) ?? BigInt.parse(digits);
+      return _wholeNumber(digits);
     }
     return _ident();
   }
@@ -216,7 +216,7 @@ class _SurqlReader {
         'dec' => Decimal(digits),
         'f' => double.parse(digits),
         _ when digits.contains(RegExp('[.eE]')) => double.parse(digits),
-        _ => int.tryParse(digits) ?? BigInt.parse(digits),
+        _ => _wholeNumber(digits),
       };
     }
     final start = _i;
@@ -256,6 +256,13 @@ class _SurqlReader {
       }
     }
     throw FormatException('Unterminated string', _text, _i);
+  }
+
+  /// An integer as an [int] when it is one exactly on this platform, which
+  /// on the web means within 53 bits, and as a [BigInt] otherwise.
+  static Object _wholeNumber(String digits) {
+    final value = BigInt.parse(digits);
+    return value.isValidInt ? value.toInt() : value;
   }
 
   /// Reads the character after a backslash in a string, and any digits of a
