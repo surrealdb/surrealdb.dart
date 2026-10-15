@@ -114,4 +114,13 @@ void main() {
     expect(error.statementIndex, 2);
     expect(error.code, 0);
   });
+
+  test('a statement error without a kind is internal, not thrown', () {
+    final error = ServerError.fromStatement({
+      'status': 'ERR',
+      'result': 'Database record `person:1` already exists',
+    });
+    expect(error, isA<InternalError>());
+    expect(error, isNot(isA<ThrownError>()));
+  });
 }
