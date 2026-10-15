@@ -122,6 +122,19 @@ void main() {
       await db.use(namespace: 'a', database: 'b');
       await db.authenticate(jwt({'NS': 'ns', 'ID': 'u'}));
       expect([db.namespace, db.database], ['ns', 'b']);
+      // Every spelling the server accepts.
+      await db.authenticate(jwt({'ns': 'n2', 'db': 'd2'}));
+      expect([db.namespace, db.database], ['n2', 'd2']);
+      await db.authenticate(jwt({
+        'https://surrealdb.com/namespace': 'n3',
+        'https://surrealdb.com/database': 'd3',
+      }));
+      expect([db.namespace, db.database], ['n3', 'd3']);
+      await db.authenticate(jwt({
+        'https://surrealdb.com/ns': 'n4',
+        'https://surrealdb.com/db': 'd4',
+      }));
+      expect([db.namespace, db.database], ['n4', 'd4']);
     });
 
     test('a selection made after authenticating wins on a reconnect', () async {

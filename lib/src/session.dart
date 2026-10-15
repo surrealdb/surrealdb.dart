@@ -72,7 +72,12 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// await db.use(namespace: null);   // clear both
   /// ```
   Future<void> use(
-      {String? namespace = _unchanged, String? database = _unchanged}) async {
+          {String? namespace = _unchanged, String? database = _unchanged}) =>
+      // After a renewal under way, which selects what its new token names,
+      // so that this selection is the one that stays.
+      _changingAuth(() => _use(namespace, database), keepCredentials: true);
+
+  Future<void> _use(String? namespace, String? database) async {
     final keepNamespace = identical(namespace, _unchanged);
     final keepDatabase = identical(database, _unchanged);
     if (!keepNamespace &&

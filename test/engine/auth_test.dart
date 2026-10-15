@@ -1,11 +1,38 @@
 @TestOn('vm')
 library;
 
+import 'dart:typed_data';
+
 import 'package:surrealdb/src/internal/jwt.dart';
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
 import '../support/fake_server.dart';
+
+/// A point, which only [_PointCodec] can encode.
+class _Point {
+  const _Point(this.x, this.y);
+  final int x;
+  final int y;
+}
+
+/// CBOR, with points encoded as `[x, y]`.
+class _PointCodec extends CborCodec {
+  const _PointCodec();
+
+  static Object? _points(Object? value) => switch (value) {
+        _Point(:final x, :final y) => [x, y],
+        Map() => {
+            for (final MapEntry(:key, :value) in value.entries)
+              key: _points(value),
+          },
+        List() => [for (final item in value) _points(item)],
+        _ => value,
+      };
+
+  @override
+  Uint8List encode(Object? value) => super.encode(_points(value));
+}
 
 void main() {
   group('jwt', () {
@@ -488,9 +515,14 @@ void main() {
     }, timeout: const Timeout(Duration(seconds: 20)));
 
     test('signing in again keeps what was selected since', () async {
+      // Only the first token is short lived, so there is one renewal.
       server.handler = (r) => r.method == 'signin'
-          ? FakeResult(fakeJwt(const Duration(seconds: 1),
-              id: '${issued++}', claims: {'NS': 'ns', 'DB': 'db'}))
+          ? FakeResult(fakeJwt(
+              issued == 0
+                  ? const Duration(seconds: 1)
+                  : const Duration(hours: 1),
+              id: '${issued++}',
+              claims: {'NS': 'ns', 'DB': 'db'}))
           : FakeSurrealServer.defaultReply(r);
       await db.connect(server.url,
           options: const ConnectOptions(
@@ -505,7 +537,8 @@ void main() {
           timeout: const Duration(seconds: 3));
       await eventually(() => server.methods.last == 'use');
       expect(server.requests.last.params, ['ns', 'other']);
-      expect([db.namespace, db.database], ['ns', 'other']);
+      await eventually(() => db.database == 'other');
+      expect(db.namespace, 'ns');
     });
 
     test('signing in again uses the credentials as they were given', () async {
@@ -529,6 +562,95 @@ void main() {
       final signins = server.requests.where((r) => r.method == 'signin');
       expect(signins.last.params, signins.first.params);
       expect((signins.last.params.single as Map)['email'], 'a@example.com');
+    });
+
+    test('a selection made during a renewal is the one that stays', () async {
+      FakeRequest? held;
+      var signins = 0;
+      server.handler = (r) {
+        if (r.method == 'signin' && ++signins == 2) {
+          held = r;
+          return const FakeSilence();
+        }
+        return r.method == 'signin'
+            ? FakeResult(fakeJwt(const Duration(seconds: 1),
+                claims: {'NS': 'ns', 'DB': 'db'}))
+            : FakeSurrealServer.defaultReply(r);
+      };
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: DatabaseAuth(
+                namespace: 'ns', database: 'db', username: 'u', password: 'p'),
+          ));
+      await eventually(() => held != null, timeout: const Duration(seconds: 3));
+      final using = db.use(database: 'other');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      final renewed =
+          fakeJwt(const Duration(hours: 1), claims: {'NS': 'ns', 'DB': 'db'});
+      held!.socket
+          .add(const CborCodec().encode({'id': held!.id, 'result': renewed}));
+      await using;
+      await eventually(() => db.tokens?.access == renewed);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(db.database, 'other');
+      expect(server.methods.last, 'use');
+      expect(server.requests.last.params, ['ns', 'other']);
+    });
+
+    test('a selection lost with the connection after a renewal is made again',
+        () async {
+      var signins = 0;
+      var silenceUse = false;
+      server.handler = (r) {
+        if (r.method == 'signin') {
+          signins++;
+          if (signins == 2) silenceUse = true;
+          return FakeResult(fakeJwt(
+              signins == 1
+                  ? const Duration(seconds: 1)
+                  : const Duration(hours: 1),
+              id: '$signins',
+              claims: {'NS': 'ns', 'DB': 'db'}));
+        }
+        if (r.method == 'use' && silenceUse) {
+          silenceUse = false;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            requestTimeout: Duration(milliseconds: 300),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+            authentication: DatabaseAuth(
+                namespace: 'ns', database: 'db', username: 'u', password: 'p'),
+          ));
+      await db.use(database: 'other');
+      await eventually(() => server.accepted == 2,
+          timeout: const Duration(seconds: 3));
+      await eventually(() => db.status == ConnectionStatus.connected);
+      expect(db.database, 'other');
+      final replayed = server.requests.where((r) => r.method == 'use').last;
+      expect(replayed.params, ['ns', 'other']);
+    });
+
+    test('credentials are copied with the codec they are sent with', () async {
+      await db.connect(server.url,
+          options: ConnectOptions(
+            versionCheck: false,
+            codec: const _PointCodec(),
+            authentication: AccessRecordAuth(
+                access: 'user',
+                namespace: 'ns',
+                database: 'db',
+                variables: {'at': const _Point(1, 2)}),
+          ));
+      expect((server.requests.last.params.single as Map)['at'], [1, 2]);
     });
 
     test('a reconnect keeps the tokens until signing in again works', () async {
