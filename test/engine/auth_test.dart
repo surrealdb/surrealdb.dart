@@ -284,5 +284,120 @@ void main() {
       ]);
       expect(db.tokens?.refresh, 'refresh-1');
     });
+
+    test('a reconnect that cannot check the token keeps it and tries again',
+        () async {
+      server.handler = (r) => r.method == 'signin'
+          ? issueTokens(r, const Duration(hours: 1))
+          : FakeSurrealServer.defaultReply(r);
+      await connect();
+      final tokens =
+          await db.signin(const RootAuth(username: 'u', password: 'p'));
+      var failures = 0;
+      server.handler = (r) => r.method == 'authenticate' && failures++ == 0
+          ? const FakeError('There was a problem with the datastore',
+              extra: {'kind': 'Internal'})
+          : FakeSurrealServer.defaultReply(r);
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 3);
+      expect(server.methods, ['authenticate', 'authenticate']);
+      expect(db.tokens, tokens);
+    });
+
+    test('a reconnect whose token is rejected signs in again', () async {
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}'))
+          : FakeSurrealServer.defaultReply(r);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      final before = db.tokens;
+      server.handler = (r) => switch (r.method) {
+            'authenticate' => const FakeError('The token has expired',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            'signin' =>
+              FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}')),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(server.methods, ['authenticate', 'signin']);
+      expect(server.requests.last.params, [
+        {'user': 'u', 'pass': 'p'},
+      ]);
+      expect(db.tokens, isNotNull);
+      expect(db.tokens, isNot(before));
+    });
+
+    test('a failed sign-in keeps renewing the session it left alone', () async {
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fakeJwt(const Duration(seconds: 2), id: '${++issued}'))
+          : FakeSurrealServer.defaultReply(r);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+          ));
+      server.handler = (r) => r.method == 'signin' &&
+              (r.params.first as Map)['user'] == 'other'
+          ? const FakeError('There was a problem with authentication',
+              code: -32002, extra: {'kind': 'NotAllowed'})
+          : r.method == 'signin'
+              ? FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}'))
+              : FakeSurrealServer.defaultReply(r);
+      await expectLater(
+          db.signin(const RootAuth(username: 'other', password: 'x')),
+          throwsA(isA<NotAllowedError>()));
+
+      await eventually(
+          () =>
+              server.requests
+                  .where((r) =>
+                      r.method == 'signin' &&
+                      (r.params.first as Map)['user'] == 'u')
+                  .length ==
+              2,
+          timeout: const Duration(seconds: 3));
+    });
+
+    test('overlapping authenticate calls each keep their refresh token',
+        () async {
+      await connect();
+      FakeRequest? held;
+      server.handler = (r) {
+        if (r.method == 'authenticate' && held == null) {
+          held = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final first = fakeJwt(const Duration(hours: 1), id: 'a');
+      final second = fakeJwt(const Duration(hours: 1), id: 'b');
+      final firstCall = db.authenticate(first, refreshToken: 'r-a');
+      final secondCall = db.authenticate(second, refreshToken: 'r-b');
+      await eventually(() => held != null);
+      // The second waits for the first.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(server.methods.where((m) => m == 'authenticate'), hasLength(1));
+
+      held!.socket
+          .add(const CborCodec().encode({'id': held!.id, 'result': null}));
+      await firstCall;
+      expect(db.tokens, Tokens(access: first, refresh: 'r-a'));
+      await secondCall;
+      expect(db.tokens, Tokens(access: second, refresh: 'r-b'));
+    });
   });
 }

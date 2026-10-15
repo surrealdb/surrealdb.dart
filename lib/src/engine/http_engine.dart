@@ -74,10 +74,23 @@ class HttpEngine implements Engine {
   Stream<LiveMessage> get liveNotifications => const Stream.empty();
 
   @override
+  set onVerify(
+      Future<void> Function(
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
+
+  @override
   set onReconnect(Future<void> Function()? handler) {}
 
   @override
-  set onAuthenticationLost(void Function(Object error)? handler) {}
+  set onAuthenticationLost(
+      Future<void> Function(
+              Uuid? session,
+              Object error,
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
 
   @override
   Future<void> open(Uri url,

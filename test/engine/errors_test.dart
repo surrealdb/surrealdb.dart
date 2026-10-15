@@ -91,6 +91,8 @@ void main() {
     expect(decode({'code': -32700, 'message': 'x'}), isA<ValidationError>());
     expect(decode({'code': -32006, 'message': 'x'}), isA<ThrownError>());
     expect(decode({'code': -32009, 'message': 'x'}), isA<QueryError>());
+    expect(
+        decode({'code': -32001, 'message': 'x'}), isA<ServerConnectionError>());
     expect(decode({'code': -1, 'message': 'x'}), isA<InternalError>());
   });
 
@@ -113,6 +115,41 @@ void main() {
     expect((error as NotFoundError).namespaceName, 'x');
     expect(error.statementIndex, 2);
     expect(error.code, 0);
+  });
+
+  test('reads a failed statement from 3.0.0, which wraps its detail', () {
+    final error = ServerError.fromStatement({
+      'status': 'ERR',
+      'result': "The table 'x' does not exist",
+      'kind': 'NotFound',
+      'details': {
+        'kind': 'NotFound',
+        'details': {
+          'kind': 'Table',
+          'details': {'name': 'x'},
+        },
+      },
+    });
+    expect((error as NotFoundError).tableName, 'x');
+  });
+
+  test('a failed statement keeps its cause', () {
+    final error = ServerError.fromStatement({
+      'status': 'ERR',
+      'result': 'An error occurred: boom',
+      'kind': 'Thrown',
+      'cause': {
+        'code': -32000,
+        'message': 'boom',
+        'kind': 'NotAllowed',
+        'details': {
+          'kind': 'Auth',
+          'details': {'kind': 'TokenExpired'}
+        },
+      },
+    });
+    expect(error.cause, isA<NotAllowedError>());
+    expect(error.cause?.message, 'boom');
   });
 
   test('a statement error without a kind is internal, not thrown', () {

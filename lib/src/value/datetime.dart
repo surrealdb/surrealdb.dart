@@ -25,9 +25,22 @@ final class SurrealDateTime extends SurrealValue {
   /// The current time.
   factory SurrealDateTime.now() => SurrealDateTime.fromDateTime(DateTime.now());
 
-  /// Parses an RFC 3339 timestamp such as `2026-06-16T10:00:00Z`.
-  factory SurrealDateTime.parse(String value) =>
-      SurrealDateTime.fromDateTime(DateTime.parse(value));
+  /// Parses an RFC 3339 timestamp such as `2026-06-16T10:00:00Z`. Fractional
+  /// seconds keep up to nanosecond precision.
+  factory SurrealDateTime.parse(String value) {
+    final match = _fraction.firstMatch(value);
+    if (match == null) {
+      return SurrealDateTime.fromDateTime(DateTime.parse(value));
+    }
+    // Dart only keeps microseconds, so the fraction is read separately.
+    final whole =
+        DateTime.parse(value.replaceRange(match.start, match.end, ''));
+    final digits = match.group(1)!.padRight(9, '0').substring(0, 9);
+    return SurrealDateTime(
+        whole.millisecondsSinceEpoch ~/ 1000, int.parse(digits));
+  }
+
+  static final _fraction = RegExp(r'(?<=[T ]\d{2}:\d{2}:\d{2})[.,](\d+)');
 
   final int seconds;
   final int nanoseconds;

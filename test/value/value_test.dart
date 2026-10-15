@@ -65,6 +65,15 @@ void main() {
       final dt = SurrealDateTime.parse('2026-06-16T10:00:00Z');
       expect(dt.toDateTime(), DateTime.utc(2026, 6, 16, 10));
     });
+
+    test('parses RFC 3339 with nanoseconds', () {
+      expect(SurrealDateTime.parse('2026-01-01T00:00:00.123456789Z'),
+          const SurrealDateTime(1767225600, 123456789));
+      expect(SurrealDateTime.parse('2026-01-01T02:00:00.5+02:00'),
+          const SurrealDateTime(1767225600, 500000000));
+      expect(SurrealDateTime.parse('1969-12-31T23:59:59.999999999Z'),
+          const SurrealDateTime(-1, 999999999));
+    });
   });
 
   group('Uuid', () {
