@@ -35,6 +35,13 @@ void main() {
         DEFINE API OVERWRITE "/body-type" FOR post THEN {
           RETURN { status: 200, body: type::of($request.body) };
         };
+        DEFINE API OVERWRITE "/reply" FOR get THEN {
+          RETURN IF $request.query.empty = "none" { { status: 200 } }
+            ELSE { { status: 200, body: NULL } };
+        };
+        DEFINE API OVERWRITE "/trace" FOR trace THEN {
+          RETURN { status: 200, body: $request.body };
+        };
       ''');
       await admin.close();
     });
@@ -44,7 +51,8 @@ void main() {
       await admin.query('REMOVE TABLE IF EXISTS gperson; '
           'REMOVE TABLE IF EXISTS knows; REMOVE CONFIG IF EXISTS GRAPHQL; '
           'REMOVE API IF EXISTS "/greet/:name"; REMOVE API IF EXISTS "/echo"; '
-          'REMOVE API IF EXISTS "/body-type";');
+          'REMOVE API IF EXISTS "/body-type"; REMOVE API IF EXISTS "/reply"; '
+          'REMOVE API IF EXISTS "/trace";');
       await admin.close();
     });
 
@@ -108,6 +116,18 @@ void main() {
         test('api tells an explicit null body from no body', () async {
           expect((await db.api.post('/body-type', body: null)).body, 'null');
           expect((await db.api.post('/body-type')).body, 'none');
+        });
+
+        test('api tells a response with no body from a null body', () async {
+          final empty = await db.api.get('/reply', query: {'empty': 'none'});
+          final nulled = await db.api.get('/reply', query: {'empty': 'null'});
+          expect(empty.body, none);
+          expect(nulled.body, isNull);
+        });
+
+        test('api sends a body with trace', () async {
+          final response = await db.api.trace('/trace', body: {'n': 1});
+          expect(response.body, {'n': 1});
         });
 
         test('an unsuccessful api call throws from value()', () async {

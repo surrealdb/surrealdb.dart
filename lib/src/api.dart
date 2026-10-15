@@ -89,8 +89,10 @@ final class SurrealApi {
 
   /// Calls [path] with `TRACE`.
   Future<ApiResponse> trace(String path,
-          {Map<String, String>? headers, Map<String, String>? query}) =>
-      invoke(path, method: 'trace', headers: headers, query: query);
+          {Object? body = const _NoBody(),
+          Map<String, String>? headers,
+          Map<String, String>? query}) =>
+      invoke(path, method: 'trace', body: body, headers: headers, query: query);
 }
 
 /// Marks a body that was left out, as distinct from an explicit null.
@@ -115,7 +117,7 @@ final class ApiResponse {
                 e.key.toString(): e.value.toString(),
             }
           : const {},
-      body: body is SurrealNone ? null : body,
+      body: body,
     );
   }
 
@@ -125,7 +127,8 @@ final class ApiResponse {
   /// The headers the API returned.
   final Map<String, String> headers;
 
-  /// The body the API returned.
+  /// The body the API returned: [none] when it returned no body, as distinct
+  /// from an explicit null.
   final Object? body;
 
   /// Whether [status] is in the 2xx range.
