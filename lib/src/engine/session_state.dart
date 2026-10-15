@@ -68,8 +68,18 @@ class SessionState {
   void _selectScopeOf(String? token) {
     final claims = token == null ? null : _claimsOf(token);
     if (claims == null) return;
-    final ns = claims['NS'];
-    final db = claims['DB'];
+    final ns = _claim(claims, const [
+      'NS',
+      'ns',
+      'https://surrealdb.com/ns',
+      'https://surrealdb.com/namespace',
+    ]);
+    final db = _claim(claims, const [
+      'DB',
+      'db',
+      'https://surrealdb.com/db',
+      'https://surrealdb.com/database',
+    ]);
     if (ns is String) {
       namespace = ns;
       namespaceCleared = false;
@@ -78,6 +88,15 @@ class SessionState {
       database = db;
       databaseCleared = false;
     }
+  }
+
+  /// The first of [names], the spellings the server accepts for a claim,
+  /// that [claims] has.
+  static Object? _claim(Map<Object?, Object?> claims, List<String> names) {
+    for (final name in names) {
+      if (claims.containsKey(name)) return claims[name];
+    }
+    return null;
   }
 
   /// The claims of a JWT, read without verifying it.
