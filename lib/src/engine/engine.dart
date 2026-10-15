@@ -52,11 +52,11 @@ abstract class Engine {
   /// Called when a reconnect could not restore authentication because the
   /// server rejected the tokens, for example because they expired while the
   /// connection was down, with a function that sends calls on the new
-  /// connection. The driver can sign in again with it; otherwise the
-  /// connection continues without authentication. If it throws, the attempt
-  /// counts as failed and is tried again.
+  /// connection. The driver can sign in again with it, and returns whether
+  /// it did; otherwise the connection continues without authentication. If
+  /// it throws, the attempt counts as failed and is tried again.
   set onAuthenticationLost(
-      Future<void> Function(
+      Future<bool> Function(
               Object error,
               Future<Object?> Function(String method, List<Object?> params)
                   call)?

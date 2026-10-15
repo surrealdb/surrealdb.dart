@@ -57,7 +57,7 @@ class WebSocketEngine implements Engine {
   Future<void> Function(
           Future<Object?> Function(String method, List<Object?> params) call)?
       _onVerify;
-  Future<void> Function(Object error,
+  Future<bool> Function(Object error,
           Future<Object?> Function(String method, List<Object?> params) call)?
       _onAuthenticationLost;
 
@@ -86,7 +86,7 @@ class WebSocketEngine implements Engine {
 
   @override
   set onAuthenticationLost(
-          Future<void> Function(
+          Future<bool> Function(
                   Object error,
                   Future<Object?> Function(String method, List<Object?> params)
                       call)?
@@ -348,11 +348,10 @@ class WebSocketEngine implements Engine {
         // one, for example because they expired. The driver may sign in
         // again; if that fails for now, the attempt fails with the tokens
         // kept, so the next one tries again.
-        final rejected = session.token;
-        await _onAuthenticationLost?.call(error, _call);
+        final signedIn = await _onAuthenticationLost?.call(error, _call);
         // The connection itself is fine, so otherwise carry on without them
         // rather than failing every attempt.
-        if (session.token == rejected) session.setTokens(null, null);
+        if (signedIn != true) session.setTokens(null, null);
       }
     }
     if (!known) {
