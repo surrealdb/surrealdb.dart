@@ -8,6 +8,9 @@ const int _secondsPerHour = 3600;
 const int _secondsPerDay = 86400;
 const int _secondsPerWeek = 604800;
 
+/// A year, as SurrealDB counts it: 365 days.
+const int _secondsPerYear = 31536000;
+
 /// A length of time, held as whole seconds plus a nanosecond remainder. This
 /// matches the precision SurrealDB uses and avoids the microsecond limit of
 /// the Dart [Duration] type.
@@ -61,7 +64,12 @@ final class SurrealDuration extends SurrealValue {
   factory SurrealDuration.weeks(int value) =>
       SurrealDuration(seconds: value * _secondsPerWeek);
 
-  /// Parses a SurrealDB duration string such as `1w2d3h`, `500ms` or `90s`.
+  /// [value] years of 365 days, as SurrealDB counts them.
+  factory SurrealDuration.years(int value) =>
+      SurrealDuration(seconds: value * _secondsPerYear);
+
+  /// Parses a SurrealDB duration string such as `1y2w`, `1w2d3h`, `500ms` or
+  /// `90s`.
   /// A leading `-` gives a negative duration, as [toString] writes one.
   factory SurrealDuration.parse(String input) {
     if (input.startsWith('-')) {
@@ -102,6 +110,8 @@ final class SurrealDuration extends SurrealValue {
           seconds += amount * _secondsPerDay;
         case 'w':
           seconds += amount * _secondsPerWeek;
+        case 'y':
+          seconds += amount * _secondsPerYear;
       }
     }
     if (consumed != input.length) {
@@ -161,6 +171,7 @@ final class SurrealDuration extends SurrealValue {
       }
     }
 
+    unit(_secondsPerYear, 'y');
     unit(_secondsPerWeek, 'w');
     unit(_secondsPerDay, 'd');
     unit(_secondsPerHour, 'h');
@@ -190,4 +201,4 @@ final class SurrealDuration extends SurrealValue {
   int get hashCode => Object.hash(seconds, nanoseconds);
 }
 
-final RegExp _durationPattern = RegExp(r'(\d+)(ns|µs|us|ms|s|m|h|d|w)');
+final RegExp _durationPattern = RegExp(r'(\d+)(ns|µs|us|ms|s|m|h|d|w|y)');
