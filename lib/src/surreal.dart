@@ -74,8 +74,16 @@ class Surreal {
   String? get serverVersion => _version;
 
   /// The current connection status.
-  ConnectionStatus get status =>
-      _engine?.status ?? ConnectionStatus.disconnected;
+  ConnectionStatus get status {
+    final status = _engine?.status ?? ConnectionStatus.disconnected;
+    return _verifying && status == ConnectionStatus.connected
+        ? ConnectionStatus.connecting
+        : status;
+  }
+
+  /// Whether [connect] is still checking the server, so the connection is
+  /// not yet reported as connected.
+  var _verifying = false;
 
   /// Whether there is an open connection.
   bool get isConnected => status == ConnectionStatus.connected;
@@ -109,16 +117,18 @@ class Surreal {
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
-    await engine.open(uri, timeout: options.timeout);
-
-    if (options.versionCheck) {
-      try {
-        await _checkVersion();
-      } catch (_) {
-        await close();
-        rethrow;
-      }
+    // The server is checked before anyone is told the connection is open.
+    _verifying = options.versionCheck;
+    try {
+      await engine.open(uri, timeout: options.timeout);
+      if (options.versionCheck) await _checkVersion();
+    } catch (_) {
+      _verifying = false;
+      await close();
+      rethrow;
     }
+    _verifying = false;
+    _publishStatus(engine.status);
     if (options.namespace != null || options.database != null) {
       await use(namespace: options.namespace, database: options.database);
     }
@@ -181,6 +191,7 @@ class Surreal {
   }
 
   void _publishStatus(ConnectionStatus status) {
+    if (_verifying && status == ConnectionStatus.connected) return;
     if (status == _publishedStatus) return;
     _publishedStatus = status;
     _statusController.add(status);
