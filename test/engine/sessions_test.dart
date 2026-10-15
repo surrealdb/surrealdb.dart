@@ -322,6 +322,8 @@ void main() {
       final session = await db.newSession();
       await db.close();
       expect(session.isClosed, isTrue);
+      expect(() => session.beginTransaction(),
+          throwsA(isA<InvalidSessionError>()));
     });
 
     test('lists sessions', () async {
