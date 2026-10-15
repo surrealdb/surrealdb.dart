@@ -245,8 +245,8 @@ class _SurqlReader {
     while (_i < _text.length) {
       final char = _text[_i];
       if (char == r'\' && _i + 1 < _text.length) {
-        buffer.write(_text[_i + 1]);
-        _i += 2;
+        _i++;
+        buffer.write(_escape());
       } else if (char == quote) {
         _i++;
         return buffer.toString();
@@ -256,6 +256,38 @@ class _SurqlReader {
       }
     }
     throw FormatException('Unterminated string', _text, _i);
+  }
+
+  /// Reads the character after a backslash in a string, and any digits of a
+  /// unicode escape, and returns what it stands for.
+  String _escape() {
+    final char = _text[_i++];
+    switch (char) {
+      case 'n':
+        return '\n';
+      case 'r':
+        return '\r';
+      case 't':
+        return '\t';
+      case 'b':
+        return '\b';
+      case 'f':
+        return '\f';
+      case '0':
+        return '\x00';
+      case 'u':
+        final braced = _peek() == '{';
+        final end = braced ? _text.indexOf('}', _i) : _i + 4;
+        final digits = _text.substring(braced ? _i + 1 : _i, end);
+        final code = int.tryParse(digits, radix: 16);
+        if (end < 0 || code == null) {
+          throw FormatException('Invalid unicode escape', _text, _i);
+        }
+        _i = braced ? end + 1 : end;
+        return String.fromCharCode(code);
+      default:
+        return char;
+    }
   }
 
   /// An identifier: plain, or escaped with backticks or angle brackets.
