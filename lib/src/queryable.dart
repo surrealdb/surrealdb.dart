@@ -14,7 +14,9 @@ mixin SurrealQueryable {
 
   /// Runs a SurrealQL query and returns the result of each statement in order.
   /// If any statement fails, throws the [ServerError] for the first failure,
-  /// with its kind, details and [ServerError.statementIndex].
+  /// with its kind, details and [ServerError.statementIndex]. In a failed
+  /// transaction the statements that were only not executed are passed over
+  /// for the one that made it fail, such as a transaction conflict.
   ///
   /// Bind parameters by referencing them as `$name` in [query] and passing the
   /// values in [bindings].
@@ -22,12 +24,16 @@ mixin SurrealQueryable {
       {Map<String, Object?>? bindings}) async {
     final statements = await queryRaw(query, bindings: bindings);
     final results = <Object?>[];
+    ServerError? failure;
     for (final (index, statement) in statements.indexed) {
       if (statement['status'] != 'OK') {
-        throw ServerError.fromStatement(statement, index: index);
+        final error = ServerError.fromStatement(statement, index: index);
+        if (error is! QueryError || !error.isNotExecuted) throw error;
+        failure ??= error;
       }
       results.add(statement['result']);
     }
+    if (failure != null) throw failure;
     return results;
   }
 

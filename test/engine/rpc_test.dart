@@ -143,6 +143,11 @@ void main() {
     // Datetimes keep their nanoseconds.
     expect(parseRecordId("event:[d'2026-01-01T00:00:00.123456789Z']")?.id,
         [SurrealDateTime(1767225600, 123456789)]);
+    // Past 53 bits an integer stays exact, as a BigInt on the web.
+    expect(parseRecordId('person:9007199254740993')?.id.toString(),
+        '9007199254740993');
+    expect(parseRecordId('person:[9007199254740993]')?.id.toString(),
+        '[9007199254740993]');
     expect(parseRecordId('person:[1, '), isNull);
     expect(parseRecordId('person'), isNull);
   });

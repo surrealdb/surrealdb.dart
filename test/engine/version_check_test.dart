@@ -63,6 +63,32 @@ void main() {
       expect(server.methods, ['version']);
     });
 
+    test('connected is published only once the version is checked', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      bool? checked;
+      db.statusChanges.listen((status) {
+        if (status == ConnectionStatus.connected) {
+          checked ??= server.methods.contains('version');
+        }
+      });
+      await db.connect(server.url);
+      await eventually(() => checked != null);
+      expect(checked, isTrue);
+      await db.close();
+    });
+
+    test('an unsupported server is never published as connected', () async {
+      server.handler = versionIs('surrealdb-5.0.0');
+      final db = Surreal();
+      final statuses = <ConnectionStatus>[];
+      db.statusChanges.listen(statuses.add);
+      await expectLater(
+          db.connect(server.url), throwsA(isA<UnsupportedVersionError>()));
+      await Future<void>.delayed(Duration.zero);
+      expect(statuses, isNot(contains(ConnectionStatus.connected)));
+    });
+
     test('accepts a 4.x server', () async {
       server.handler = versionIs('surrealdb-4.0.0');
       final db = Surreal();
@@ -142,6 +168,46 @@ void main() {
       await server.dropAll();
       await eventually(() => server.methods.contains('let'));
       expect(server.methods.first, 'version');
+      expect(server.requests.last.params[1], isA<List<Object?>>());
+    });
+
+    test('a set sent as soon as the client is connected is an array', () async {
+      final db = Surreal();
+      addTearDown(db.close);
+      Future<void>? sent;
+      db.statusChanges.listen((status) {
+        if (status == ConnectionStatus.connected) {
+          sent ??= db.query(r'RETURN $s', bindings: {
+            's': {1, 2},
+          });
+        }
+      });
+      await db.connect(server.url,
+          options: const ConnectOptions(versionCheck: false));
+      await eventually(() => sent != null);
+      await sent;
+      expect(
+          (server.requests.last.params[1] as Map)['s'], isA<List<Object?>>());
+    });
+
+    test('an unchecked reconnect sends sets as arrays again', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      addTearDown(db.close);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              versionCheck: false,
+              reconnect: ReconnectOptions(
+                retryDelay: Duration(milliseconds: 10),
+                retryDelayMax: Duration(milliseconds: 10),
+              )));
+      await db.version();
+      await db.set('s', {1, 2});
+      expect(server.requests.last.params[1], isA<Set<Object?>>());
+
+      server.requests.clear();
+      await server.dropAll();
+      await eventually(() => server.methods.contains('let'));
       expect(server.requests.last.params[1], isA<List<Object?>>());
     });
 

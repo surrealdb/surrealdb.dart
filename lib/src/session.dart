@@ -239,7 +239,14 @@ mixin SurrealSessionMethods on SurrealQueryable {
     // The handle for a query that is already registered is shared, so that
     // killing one does not leave another open.
     final existing = _client._liveByUuid[id.toString()];
-    if (existing != null) return existing.query;
+    if (existing != null) {
+      // A handle from another session would kill the query in that one.
+      if (existing.session != _sessionId) {
+        throw SurrealError(
+            'The live query $id belongs to another session of this client');
+      }
+      return existing.query;
+    }
     return _client._registerLive(id, _sessionId, null, false);
   }
 
