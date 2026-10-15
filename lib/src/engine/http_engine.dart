@@ -22,7 +22,9 @@ class HttpEngine implements Engine {
     SurrealCodec codec, {
     http.Client? client,
     Duration? requestTimeout = const Duration(seconds: 30),
-  })  : _protocol = RpcProtocol(codec),
+    SessionState? session,
+  })  : _session = session ?? SessionState(),
+        _protocol = RpcProtocol(codec),
         _client = client ?? http.Client(),
         _requestTimeout = requestTimeout;
 
@@ -45,7 +47,7 @@ class HttpEngine implements Engine {
   /// The session state sent with every request: the namespace and database
   /// as headers, the token as a bearer token and the variables merged into
   /// each query.
-  final SessionState _session = SessionState();
+  final SessionState _session;
 
   /// The namespace currently selected for outgoing requests.
   String? get namespace => _session.namespace;
@@ -79,7 +81,12 @@ class HttpEngine implements Engine {
   set onReconnect(Future<void> Function()? handler) {}
 
   @override
-  set onAuthenticationLost(void Function(Object error)? handler) {}
+  set onAuthenticationLost(
+      Future<bool> Function(
+              Object error,
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
 
   @override
   Future<void> open(Uri url,
@@ -103,8 +110,15 @@ class HttpEngine implements Engine {
     switch (method) {
       // Each HTTP request is its own server-side session, so session state is
       // kept here and sent with every request instead.
-      case 'use':
       case 'authenticate':
+        // Checked with the server, as over WebSocket, so that a token it
+        // rejects fails here rather than every call after.
+        if (params.isNotEmpty && params[0] != null) {
+          await _send(method, params);
+        }
+        _session.apply(method, params, null);
+        return null;
+      case 'use':
       case 'invalidate':
       case 'let':
         // Kept as it encodes now, so later changes to the caller's objects

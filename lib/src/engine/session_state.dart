@@ -1,6 +1,17 @@
 import 'dart:convert';
 
+import '../errors.dart';
 import '../value/value.dart';
+
+/// Whether [error] is the server refusing the credentials or tokens it was
+/// given, rather than failing to check them. Servers before 3.0 send no
+/// kind, so their message is read instead.
+bool rejectsAuthentication(Object error) {
+  if (error is NotAllowedError) return true;
+  if (error is! ServerError || error.rawKind != null) return false;
+  final message = error.message.toLowerCase();
+  return message.contains('authentication') || message.contains('token');
+}
 
 /// The state of one server-side session, as the client knows it: the
 /// selected namespace and database, the access token and the variables set
@@ -25,8 +36,38 @@ class SessionState {
 
   /// The database to select again after a reconnect, like [replayNamespace].
   Object? get replayDatabase => database ?? (databaseCleared ? null : none);
-  String? token;
+
+  String? _token;
+  String? _refreshToken;
   final Map<String, Object?> variables = {};
+
+  /// Called whenever the access or refresh token changes.
+  void Function()? onTokensChanged;
+
+  /// The access token the session is authenticated with.
+  String? get token => _token;
+
+  /// The refresh token issued with [token], if any.
+  String? get refreshToken => _refreshToken;
+
+  String? _expectedAccess;
+  String? _expectedRefresh;
+
+  /// Records that an `authenticate` call with [access] comes with
+  /// [refresh], so that the call's success sets both tokens in one change.
+  /// Pass nulls to forget it.
+  void expectTokens(String? access, String? refresh) {
+    _expectedAccess = access;
+    _expectedRefresh = refresh;
+  }
+
+  /// Replaces both tokens at once.
+  void setTokens(String? access, String? refresh) {
+    if (access == _token && refresh == _refreshToken) return;
+    _token = access;
+    _refreshToken = refresh;
+    onTokensChanged?.call();
+  }
 
   /// Applies the effect of a successful [method] call with [params] that
   /// returned [result].
@@ -37,13 +78,23 @@ class SessionState {
       case 'signin':
       case 'signup':
       case 'refresh':
-        token = accessTokenOf(result);
-        _selectScopeOf(token);
+        final access = accessTokenOf(result);
+        setTokens(access, refreshTokenOf(result));
+        _selectScopeOf(access);
       case 'authenticate':
-        token = params.isNotEmpty ? params[0] as String? : null;
-        _selectScopeOf(token);
+        final access = params.isNotEmpty ? params[0] as String? : null;
+        // A refresh token given with the access token arrives with it.
+        // Re-authenticating with the same token, as a reconnect does, keeps
+        // its refresh token.
+        final refresh = access != null && access == _expectedAccess
+            ? _expectedRefresh
+            : access == _token
+                ? _refreshToken
+                : null;
+        setTokens(access, refresh);
+        _selectScopeOf(access);
       case 'invalidate':
-        token = null;
+        setTokens(null, null);
       case 'let':
         final key = params[0] as String;
         // `let` without a value, or with NONE, removes the variable, as on
@@ -153,7 +204,7 @@ class SessionState {
     database = null;
     namespaceCleared = cleared;
     databaseCleared = cleared;
-    token = null;
+    setTokens(null, null);
     variables.clear();
   }
 
@@ -163,8 +214,15 @@ class SessionState {
     ..database = database
     ..namespaceCleared = namespaceCleared
     ..databaseCleared = databaseCleared
-    ..token = token
+    .._token = _token
+    .._refreshToken = _refreshToken
     ..variables.addAll(variables);
+
+  /// The refresh token in a `signin`, `signup` or `refresh` result, if any.
+  static String? refreshTokenOf(Object? result) {
+    final refresh = result is Map ? result['refresh'] : null;
+    return refresh is String ? refresh : null;
+  }
 
   /// The access token in a `signin`, `signup` or `refresh` result: a bare
   /// string, `{access, refresh}` from 3.x, or `{token}` from older servers.

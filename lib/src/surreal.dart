@@ -9,6 +9,7 @@ import 'engine/http_engine.dart';
 import 'engine/session_state.dart';
 import 'engine/websocket_engine.dart';
 import 'errors.dart';
+import 'internal/jwt.dart';
 import 'live_query.dart';
 import 'protocol/codecs.dart';
 import 'types/auth.dart';
@@ -60,13 +61,37 @@ class Surreal {
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   ConnectionStatus? _publishedStatus;
 
-  final SessionState _session = SessionState();
+  late final SessionState _session = SessionState()
+    ..onTokensChanged = _onTokensChanged;
   String? _version;
   var _versionCheck = true;
 
   /// Whether the codec is the built-in one for the format, rather than one
   /// the caller supplied.
   var _ownCodec = true;
+
+  // Token renewal.
+  var _renewTokens = true;
+  var _tokenExpiryMargin = const Duration(seconds: 60);
+
+  /// The credentials given to [connect], as sent, to sign in with again. A
+  /// copy, so that changes to the caller's objects since do not change who
+  /// signs in.
+  Map<String, Object?>? _renewWith;
+  Timer? _renewalTimer;
+
+  /// How many renewals in a row have failed, for backing off.
+  var _renewalFailures = 0;
+
+  /// Completes when the automatic renewal under way, if any, has finished.
+  Future<void>? _renewing;
+
+  /// How many calls that change the authentication are under way.
+  var _authCalls = 0;
+
+  /// Completes when the last call to change the authentication is done.
+  Future<void> _authQueue = Future.value();
+  final _authController = StreamController<Tokens?>.broadcast();
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
   StreamSubscription<LiveMessage>? _liveSubscription;
@@ -79,6 +104,20 @@ class Surreal {
 
   /// The access token in use, if the session is authenticated.
   String? get accessToken => _session.token;
+
+  /// The access token and its refresh token, if the session is
+  /// authenticated.
+  Tokens? get tokens {
+    final access = _session.token;
+    if (access == null) return null;
+    return Tokens(access: access, refresh: _session.refreshToken);
+  }
+
+  /// Emits the new [tokens] whenever they change: after signing in, a
+  /// refresh, an automatic renewal or a reconnect that had to refresh. Emits
+  /// null when the session loses its authentication. A failed automatic
+  /// renewal is delivered as an error.
+  Stream<Tokens?> get authChanges => _authController.stream;
 
   /// The server version, available after [connect] with a version check or a
   /// call to [version].
@@ -124,7 +163,9 @@ class Surreal {
     _versionCheck = options.versionCheck;
     engine.onVerify = _verifyServer;
     engine.onReconnect = _restartLiveQueries;
-    engine.onAuthenticationLost = (_) => _session.token = null;
+    engine.onAuthenticationLost = _signInAgain;
+    _renewTokens = options.renewTokens;
+    _tokenExpiryMargin = options.tokenExpiryMargin;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
@@ -149,10 +190,13 @@ class Surreal {
         database: options.database ?? _unchanged,
       );
     }
-    if (options.authentication != null) {
-      await signin(options.authentication!);
+    final credentials = options.authentication;
+    if (credentials != null) {
+      // Without a refresh token, renewal signs in again with these.
+      final params = _renewWith = _copyOf(credentials.toJson());
+      await _rpc('signin', [params]);
     } else if (options.token != null) {
-      await authenticate(options.token!);
+      await authenticate(options.token!, refreshToken: options.refreshToken);
     }
   }
 
@@ -165,6 +209,7 @@ class Surreal {
           codec,
           reconnect: options.reconnect,
           requestTimeout: options.requestTimeout,
+          session: _session,
         );
       case 'http':
       case 'https':
@@ -172,6 +217,7 @@ class Surreal {
           codec,
           client: _httpClient!,
           requestTimeout: options.requestTimeout,
+          session: _session,
         );
       default:
         throw UnsupportedEngineError(uri.scheme);
@@ -200,6 +246,9 @@ class Surreal {
       if (engine != null) _publishStatus(ConnectionStatus.disconnected);
       _httpClient?.close();
       _httpClient = null;
+      _renewWith = null;
+      _renewalTimer?.cancel();
+      _renewalTimer = null;
       _session.clear(cleared: false);
       _version = null;
     }
@@ -314,7 +363,12 @@ class Surreal {
   /// await db.use(namespace: null);   // clear both
   /// ```
   Future<void> use(
-      {String? namespace = _unchanged, String? database = _unchanged}) async {
+          {String? namespace = _unchanged, String? database = _unchanged}) =>
+      // After a renewal under way, which selects what its new token names,
+      // so that this selection is the one that stays.
+      _changingAuth(() => _use(namespace, database), keepCredentials: true);
+
+  Future<void> _use(String? namespace, String? database) async {
     final keepNamespace = identical(namespace, _unchanged);
     final keepDatabase = identical(database, _unchanged);
     if (!keepNamespace &&
@@ -349,29 +403,279 @@ class Surreal {
     ]);
   }
 
-  /// Signs up a new record access user and returns the issued tokens.
-  Future<Tokens> signup(AccessRecordAuth auth) async =>
-      _tokensFrom(await _rpc('signup', [auth.toJson()]));
-
-  /// Signs in with the given credentials and returns the issued tokens.
-  Future<Tokens> signin(AnyAuth auth) async =>
-      _tokensFrom(await _rpc('signin', [auth.toJson()]));
-
-  /// Authenticates the current session with an existing token.
-  Future<void> authenticate(String token) async {
-    await _rpc('authenticate', [token]);
+  /// Runs [call], which changes the session's authentication, with renewal
+  /// held off: a renewal under way finishes first, and none starts until
+  /// [call] is done, so a renewal can never run alongside it and undo it.
+  /// Unless [keepCredentials], the credentials for signing in again are
+  /// forgotten, since they belong to the authentication being replaced.
+  ///
+  /// Calls run one at a time, in order, so each sees the session the last
+  /// one left. One that fails leaves the authentication as it was, so its
+  /// credentials are kept.
+  Future<T> _changingAuth<T>(Future<T> Function() call,
+      {bool keepCredentials = false}) async {
+    _authCalls++;
+    _renewalTimer?.cancel();
+    _renewalTimer = null;
+    final previous = _authQueue;
+    final done = Completer<void>();
+    _authQueue = done.future;
+    final engine = _engine;
+    try {
+      await previous;
+      final renewing = _renewing;
+      if (renewing != null) await renewing;
+      // The client was closed, and maybe connected again, while this call
+      // waited its turn: it belongs to the old connection.
+      if (!identical(_engine, engine)) throw const ConnectionUnavailableError();
+      final credentials = _renewWith;
+      if (!keepCredentials) _renewWith = null;
+      try {
+        return await call();
+      } catch (_) {
+        _renewWith ??= credentials;
+        rethrow;
+      }
+    } finally {
+      done.complete();
+      _authCalls--;
+      if (_authCalls == 0) _scheduleRenewal();
+    }
   }
 
+  /// Runs when a reconnect finds the session's tokens rejected. With token
+  /// renewal on, signs in again with the credentials given to [connect];
+  /// otherwise the session carries on without authentication.
+  Future<bool> _signInAgain(
+      Object error,
+      Future<Object?> Function(String method, List<Object?> params)
+          call) async {
+    final credentials = _renewWith;
+    if (!_renewTokens || credentials == null) return false;
+    try {
+      await call('signin', [credentials]);
+      return true;
+    } on ResponseError catch (error) {
+      // Credentials that no longer work stay rejected; anything else fails
+      // the attempt, which is tried again.
+      if (!rejectsAuthentication(error)) rethrow;
+      _renewWith = null;
+      return false;
+    }
+  }
+
+  /// Signs up a new record access user and returns the issued tokens.
+  Future<Tokens> signup(AccessRecordAuth auth) => _changingAuth(
+      () async => _tokensFrom(await _rpc('signup', [auth.toJson()])));
+
+  /// Signs in with the given credentials and returns the issued tokens.
+  Future<Tokens> signin(AnyAuth auth) => _changingAuth(
+      () async => _tokensFrom(await _rpc('signin', [auth.toJson()])));
+
+  /// Authenticates the current session with an existing access [token].
+  ///
+  /// Pass the [refreshToken] issued with it to let the client refresh the
+  /// session: straight away when [token] has already expired or is
+  /// rejected, and automatically before it expires.
+  Future<void> authenticate(String token, {String? refreshToken}) =>
+      _changingAuth(() async {
+        final expiry = tokenExpiry(token);
+        final expired =
+            expiry != null && !expiry.isAfter(DateTime.now().toUtc());
+        if (refreshToken != null && expired) {
+          await _refresh(Tokens(access: token, refresh: refreshToken));
+          return;
+        }
+        // The session takes both tokens at once, when the call succeeds.
+        _session.expectTokens(token, refreshToken);
+        try {
+          await _rpc('authenticate', [token]);
+        } on NotAllowedError {
+          if (refreshToken == null) rethrow;
+          await _refresh(Tokens(access: token, refresh: refreshToken));
+          return;
+        } finally {
+          _session.expectTokens(null, null);
+        }
+      });
+
+  /// Exchanges a refresh token for a new access token and refresh token, and
+  /// authenticates the session with them. Uses the session's own [tokens]
+  /// unless others are given.
+  ///
+  /// A refresh token can be used once: the server revokes it as it issues
+  /// the new one. Needs SurrealDB 3.0 or later and an access method defined
+  /// `WITH REFRESH`.
+  Future<Tokens> refresh([Tokens? tokens]) =>
+      _changingAuth(() => _refresh(tokens ?? this.tokens),
+          // Another pair replaces the session with its own, which the
+          // credentials do not sign in to.
+          keepCredentials: tokens == null || tokens == this.tokens);
+
+  Future<Tokens> _refresh(Tokens? tokens) async {
+    if (tokens?.refresh == null) {
+      throw const AuthenticationError(
+          'There is no refresh token to refresh the session with');
+    }
+    return _tokensFrom(await _rpc('refresh', [tokens!.toJson()]));
+  }
+
+  /// Revokes a refresh token so it can no longer be used. Uses the session's
+  /// own [tokens] unless others are given. The session stays authenticated
+  /// until its access token expires, but can no longer be refreshed.
+  Future<void> revoke([Tokens? tokens]) => _changingAuth(() async {
+        final current = tokens ?? this.tokens;
+        final refreshToken = current?.refresh;
+        if (refreshToken == null) {
+          throw const AuthenticationError(
+              'There is no refresh token to revoke');
+        }
+        await _rpc('revoke', [current!.toJson()]);
+        if (_session.refreshToken == refreshToken) {
+          _session.setTokens(_session.token, null);
+        }
+      }, keepCredentials: true);
+
   /// Invalidates the current session, signing out.
-  Future<void> invalidate() async {
-    await _rpc('invalidate');
+  Future<void> invalidate() => _changingAuth(() => _rpc('invalidate'));
+
+  /// Reschedules renewal and tells listeners whenever the tokens change.
+  void _onTokensChanged() {
+    _renewalTimer?.cancel();
+    _renewalTimer = null;
+    _renewalFailures = 0;
+    if (!_authController.isClosed) _authController.add(tokens);
+    _scheduleRenewal();
+  }
+
+  /// Renews the session [_tokenExpiryMargin] before its access token
+  /// expires: with the refresh token when there is one, otherwise by signing
+  /// in again with the credentials given to [connect]. With neither, the
+  /// session is signed out when the access token expires.
+  void _scheduleRenewal({Duration? after}) {
+    final token = _session.token;
+    // A renewal under way schedules the next once it is done.
+    if (token == null || _authCalls > 0 || _renewing != null) return;
+    final expiry = tokenExpiry(token);
+    if (expiry == null) return;
+    _renewalTimer?.cancel();
+    // A refresh token can still be used once the access token has expired,
+    // for example by a reconnect, even with renewal off.
+    if (_session.refreshToken == null &&
+        (!_renewTokens || _renewWith == null)) {
+      _renewalTimer = Timer(_untilExpiry(expiry), () {
+        _renewalTimer = null;
+        if (_session.token == token) _session.setTokens(null, null);
+      });
+      return;
+    }
+    if (!_renewTokens) return;
+    final delay = after ?? renewalDelay(expiry, _tokenExpiryMargin);
+    _renewalTimer = Timer(delay, () => _renew(token, expiry));
+  }
+
+  /// Schedules the next attempt at a renewal that did not happen, backing
+  /// off.
+  void _retryRenewal() {
+    final delay = Duration(seconds: 5 << _renewalFailures.clamp(0, 4));
+    _renewalFailures++;
+    _scheduleRenewal(after: delay);
+  }
+
+  Future<void> _renew(String token, DateTime expiry) async {
+    _renewalTimer = null;
+    // The tokens changed since this renewal was scheduled, or are changing.
+    if (_session.token != token || _engine == null || _authCalls > 0) return;
+    if (_renewing != null) return;
+    final done = Completer<void>();
+    _renewing = done.future;
+    var retry = false;
+    try {
+      final credentials = _renewWith;
+      final refreshToken = _session.refreshToken;
+      final namespace = _session.replayNamespace;
+      final database = _session.replayDatabase;
+      if (refreshToken != null) {
+        await _rpc('refresh', [
+          Tokens(access: token, refresh: refreshToken).toJson(),
+        ]);
+      } else if (credentials != null) {
+        await _rpc('signin', [credentials]);
+      }
+      await _selectAgain(namespace, database);
+      // A server may give the same token back, which renews nothing.
+      retry = _session.token == token;
+    } catch (error, stackTrace) {
+      if (!_authController.isClosed) {
+        _authController.addError(error, stackTrace);
+      }
+      if (_session.token != token) return;
+      if (rejectsAuthentication(error)) {
+        // The refresh token or credentials were rejected, so retrying will
+        // not help. The session keeps its access token until it expires,
+        // and is signed out then.
+        if (_session.refreshToken != null) {
+          _session.setTokens(token, null);
+        } else {
+          _renewWith = null;
+        }
+        // Scheduled below: signs out at expiry, unless the credentials can
+        // still renew it.
+        return;
+      }
+      // Try again, backing off, for example once a dropped connection is
+      // back. This goes on after the access token expires, as the refresh
+      // token or credentials may still work.
+      retry = true;
+    } finally {
+      _renewing = null;
+      done.complete();
+      // Only now that this renewal is done, so that none overlaps it.
+      if (_renewalTimer == null) retry ? _retryRenewal() : _scheduleRenewal();
+    }
+  }
+
+  /// Selects [namespace] and [database] again, as replay values, when
+  /// signing in again selected others: what the new token names.
+  Future<void> _selectAgain(Object? namespace, Object? database) async {
+    if (_session.replayNamespace == namespace &&
+        _session.replayDatabase == database) {
+      return;
+    }
+    final engine = _engine;
+    try {
+      await _use(
+        namespace is SurrealNone ? _unchanged : namespace as String?,
+        database is SurrealNone ? _unchanged : database as String?,
+      );
+    } on ResponseError {
+      // Refused, so the session stays as signing in left it, which is what
+      // it reports.
+    } on SurrealError {
+      // The connection is down, or was dropped because the call timed out.
+      // Keep the selection wanted, which the reconnect then makes, unless
+      // the client was closed meanwhile, which forgot the session.
+      if (identical(_engine, engine)) _session.applyUse([namespace, database]);
+    }
+  }
+
+  /// A deep copy of [value], made by encoding and decoding it with the
+  /// codec requests are sent with.
+  Map<String, Object?> _copyOf(Map<String, Object?> value) {
+    final codec = _engine?.codec ?? const CborCodec();
+    return (codec.decode(codec.encode(value)) as Map).cast<String, Object?>();
+  }
+
+  static Duration _untilExpiry(DateTime expiry) {
+    final left = expiry.difference(DateTime.now().toUtc());
+    return left.isNegative ? Duration.zero : left;
   }
 
   /// Resets the session: signs out, clears the namespace, database and every
   /// variable, and stops the session's live queries. The connection stays
   /// open.
   Future<void> reset() async {
-    await _rpc('reset');
+    await _changingAuth(() => _rpc('reset'));
     // The server has stopped every live query of the session.
     final registrations = List.of(_liveByUuid.values);
     _liveByUuid.clear();
@@ -646,7 +950,6 @@ class Surreal {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
     final result = await engine.rpc(method, params);
-    _session.apply(method, params, result);
     return result is SurrealNone && method != 'run' ? null : result;
   }
 
@@ -670,13 +973,10 @@ class Surreal {
     throw ResponseError('Expected a live query id, got $result');
   }
 
-  Tokens _tokensFrom(Object? result) {
-    final refresh = result is Map ? result['refresh'] : null;
-    return Tokens(
-      access: SessionState.accessTokenOf(result) ?? '',
-      refresh: refresh is String ? refresh : null,
-    );
-  }
+  Tokens _tokensFrom(Object? result) => Tokens(
+        access: SessionState.accessTokenOf(result) ?? '',
+        refresh: SessionState.refreshTokenOf(result),
+      );
 
   Uri _httpBase() {
     final uri = _url;

@@ -5,6 +5,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../cbor/codec.dart';
 import '../errors.dart';
+import '../internal/jwt.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
@@ -21,7 +22,9 @@ class WebSocketEngine implements Engine {
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
     Duration? requestTimeout = const Duration(seconds: 30),
-  })  : _protocol = RpcProtocol(codec),
+    SessionState? session,
+  })  : _session = session ?? SessionState(),
+        _protocol = RpcProtocol(codec),
         _reconnect = reconnect,
         _requestTimeout = requestTimeout;
 
@@ -47,14 +50,16 @@ class WebSocketEngine implements Engine {
   var _reconnecting = false;
 
   /// The session state, replayed after a reconnect.
-  final SessionState _session = SessionState();
+  final SessionState _session;
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
   Future<void> Function(
           Future<Object?> Function(String method, List<Object?> params) call)?
       _onVerify;
-  void Function(Object error)? _onAuthenticationLost;
+  Future<bool> Function(Object error,
+          Future<Object?> Function(String method, List<Object?> params) call)?
+      _onAuthenticationLost;
 
   @override
   ConnectionStatus get status => _status;
@@ -80,7 +85,12 @@ class WebSocketEngine implements Engine {
   set onReconnect(Future<void> Function()? handler) => _onReconnect = handler;
 
   @override
-  set onAuthenticationLost(void Function(Object error)? handler) =>
+  set onAuthenticationLost(
+          Future<bool> Function(
+                  Object error,
+                  Future<Object?> Function(String method, List<Object?> params)
+                      call)?
+              handler) =>
       _onAuthenticationLost = handler;
 
   void _setStatus(ConnectionStatus value) {
@@ -206,6 +216,7 @@ class WebSocketEngine implements Engine {
     'let',
     'unset',
     'reset',
+    'refresh',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -312,14 +323,35 @@ class WebSocketEngine implements Engine {
     }
     final token = session.token;
     if (token != null) {
+      final refresh = session.refreshToken;
+      final expiry = tokenExpiry(token);
+      final expired = expiry != null && !expiry.isAfter(DateTime.now().toUtc());
       try {
-        await _call('authenticate', [token]);
+        if (expired && refresh != null) {
+          await _call('refresh', [
+            {'access': token, 'refresh': refresh},
+          ]);
+        } else {
+          try {
+            await _call('authenticate', [token]);
+          } on ResponseError catch (error) {
+            if (refresh == null || !rejectsAuthentication(error)) rethrow;
+            await _call('refresh', [
+              {'access': token, 'refresh': refresh},
+            ]);
+          }
+        }
       } on ResponseError catch (error) {
-        // The server rejected the token, for example because it expired. The
-        // connection itself is fine, so carry on without authentication
+        // Any other failure fails the attempt, which is tried again.
+        if (!rejectsAuthentication(error)) rethrow;
+        // The server rejected the token, and the refresh token if there was
+        // one, for example because they expired. The driver may sign in
+        // again; if that fails for now, the attempt fails with the tokens
+        // kept, so the next one tries again.
+        final signedIn = await _onAuthenticationLost?.call(error, _call);
+        // The connection itself is fine, so otherwise carry on without them
         // rather than failing every attempt.
-        session.token = null;
-        _onAuthenticationLost?.call(error);
+        if (signedIn != true) session.setTokens(null, null);
       }
     }
     if (!known) {
