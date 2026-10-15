@@ -73,9 +73,9 @@ void main() {
         ],
         [
           ['attach'],
-          ['use', 'ns', 'db'],
           ['let', 'x', 1],
           ['authenticate', 'token'],
+          ['use', 'ns', 'db'],
         ],
       );
       expect(server.requests.every((r) => r.raw['session'] == fork.id), isTrue);
@@ -87,6 +87,20 @@ void main() {
       // From then on the two are independent.
       await fork.set('y', 2);
       expect(db.variables, {'x': 1});
+    });
+
+    test('a fork keeps its parent\'s selection over the token\'s', () async {
+      final token = fakeJwt(const Duration(hours: 1), claims: {'NS': 'ns'});
+      await db.authenticate(token);
+      await db.use(namespace: 'other', database: 'db');
+      final fork = await db.forkSession();
+      expect(last('use').params, ['other', 'db']);
+      expect([fork.namespace, fork.database], ['other', 'db']);
+
+      await db.use(namespace: null);
+      final cleared = await db.forkSession();
+      expect(last('use').params, [null, null]);
+      expect([cleared.namespace, cleared.database], [null, null]);
     });
 
     test('attached sessions are attached again after a reconnect', () async {
