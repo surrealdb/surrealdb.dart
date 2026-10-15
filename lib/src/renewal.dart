@@ -2,6 +2,7 @@ part of 'surreal.dart';
 
 /// Renews one session's access token before it expires: with its refresh
 /// token when it has one, otherwise by signing in again with [credentials].
+/// With neither, the session is signed out when the access token expires.
 /// The client and every attached session have one each.
 final class _TokenRenewal {
   _TokenRenewal(this._client, this._state, this._sessionId, {this.onError});
@@ -91,11 +92,27 @@ final class _TokenRenewal {
     final token = _state.token;
     if (_stopped || !_client._renewTokens || token == null) return;
     if (_authCalls > 0) return;
-    if (_state.refreshToken == null && credentials == null) return;
     final expiry = tokenExpiry(token);
     if (expiry == null) return;
+    _timer?.cancel();
+    if (_state.refreshToken == null && credentials == null) {
+      final left = expiry.difference(DateTime.now().toUtc());
+      _timer = Timer(left.isNegative ? Duration.zero : left, () {
+        _timer = null;
+        if (_state.token == token) _state.setTokens(null, null);
+      });
+      return;
+    }
     final delay = after ?? renewalDelay(expiry, _client._tokenExpiryMargin);
     _timer = Timer(delay, () => _renew(token, expiry));
+  }
+
+  /// Schedules the next attempt at a renewal that did not happen, backing
+  /// off.
+  void _retry() {
+    final delay = Duration(seconds: 5 << _failures.clamp(0, 4));
+    _failures++;
+    _schedule(after: delay);
   }
 
   Future<void> _renew(String token, DateTime expiry) async {
@@ -119,6 +136,9 @@ final class _TokenRenewal {
         await _client._rpc('signin', [credentials.toJson()],
             session: _sessionId);
       }
+      // A server may give the same token back, which renews nothing and
+      // schedules nothing.
+      if (_state.token == token && _timer == null) _retry();
     } catch (error, stackTrace) {
       onError?.call(error, stackTrace);
       if (_state.token != token) return;
@@ -131,21 +151,14 @@ final class _TokenRenewal {
         } else {
           credentials = null;
         }
-        if (_state.token == token && credentials == null) {
-          _timer?.cancel();
-          final left = expiry.difference(DateTime.now().toUtc());
-          _timer = Timer(left.isNegative ? Duration.zero : left, () {
-            if (_state.token == token) _state.setTokens(null, null);
-          });
-        }
+        // Signs out at expiry, unless the credentials can still renew it.
+        _schedule();
         return;
       }
       // Try again, backing off, for example once a dropped connection is
       // back. This goes on after the access token expires, as the refresh
       // token or credentials may still work.
-      final delay = Duration(seconds: 5 << _failures.clamp(0, 4));
-      _failures++;
-      _schedule(after: delay);
+      _retry();
     } finally {
       _renewing = null;
       done.complete();
