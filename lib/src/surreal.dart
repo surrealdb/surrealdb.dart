@@ -420,10 +420,14 @@ class Surreal {
     final previous = _authQueue;
     final done = Completer<void>();
     _authQueue = done.future;
+    final engine = _engine;
     try {
       await previous;
       final renewing = _renewing;
       if (renewing != null) await renewing;
+      // The client was closed, and maybe connected again, while this call
+      // waited its turn: it belongs to the old connection.
+      if (!identical(_engine, engine)) throw const ConnectionUnavailableError();
       final credentials = _renewWith;
       if (!keepCredentials) _renewWith = null;
       try {
