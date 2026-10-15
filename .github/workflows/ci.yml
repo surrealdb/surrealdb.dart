@@ -17,11 +17,23 @@ jobs:
         run: dart format --output=none --set-exit-if-changed .
       - name: Analyze
         run: dart analyze --fatal-infos
-      - name: Run unit tests
-        run: dart test test/cbor test/engine test/json test/memory test/value
+      # Every test directory except the integration tests, which need a
+      # server and run in the job below. Tests that need dart:io are marked
+      # @TestOn('vm') and skipped on the web.
+      - name: Run unit tests on the VM
+        run: dart test $(ls -d test/*/ | grep -v -e integration -e support)
+      - name: Run unit tests on the web
+        run: dart test --platform chrome $(ls -d test/*/ | grep -v -e integration -e support)
 
   integration:
+    name: integration (${{ matrix.surrealdb }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The latest 3.x release and the nightly build. Add the 4.x line here
+        # once it has a release tag.
+        surrealdb: [v3, nightly]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
@@ -29,15 +41,18 @@ jobs:
         run: dart pub get
       - name: Start SurrealDB
         run: |
-          docker run -d --name surrealdb -p 8000:8000 surrealdb/surrealdb:latest \
+          docker run -d --name surrealdb -p 8000:8000 \
+            surrealdb/surrealdb:${{ matrix.surrealdb }} \
             start --user root --pass root --bind 0.0.0.0:8000 memory
       - name: Wait for SurrealDB
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8000/health; then exit 0; fi
+            if curl -sf http://127.0.0.1:8000/health; then
+              curl -s http://127.0.0.1:8000/version && exit 0
+            fi
             sleep 1
           done
-          echo "SurrealDB did not become healthy" && exit 1
+          echo "SurrealDB did not become healthy" && docker logs surrealdb && exit 1
       - name: Run integration tests
         env:
           SURREAL_INTEGRATION: '1'
