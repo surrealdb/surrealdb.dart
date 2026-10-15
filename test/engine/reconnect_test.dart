@@ -1,6 +1,8 @@
 @TestOn('vm')
 library;
 
+import 'dart:async';
+
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -74,5 +76,40 @@ void main() {
     await eventually(() => db.status == ConnectionStatus.disconnected);
     await eventually(() => server.openConnections == 0);
     expect(server.accepted, 4);
+  });
+
+  test('a drop while live queries restart starts another attempt', () async {
+    await db.connect(server.url,
+        options: const ConnectOptions(reconnect: fastReconnect));
+    await db.live('person');
+
+    server.handler = (request) {
+      if (request.method == 'live' && server.accepted == 2) {
+        unawaited(server.dropAll());
+        return const FakeSilence();
+      }
+      return FakeSurrealServer.defaultReply(request);
+    };
+    await server.dropAll();
+    await eventually(
+        () => db.status == ConnectionStatus.connected && server.accepted == 3);
+
+    expect(server.openConnections, 1);
+    await db.query('RETURN 1');
+  });
+
+  test('a rejected live restart does not escape as an unhandled error',
+      () async {
+    await db.connect(server.url,
+        options: const ConnectOptions(reconnect: fastReconnect));
+    await db.live('person');
+
+    server.handler = (request) => request.method == 'live'
+        ? const FakeError('Not allowed')
+        : FakeSurrealServer.defaultReply(request);
+    await server.dropAll();
+    await eventually(
+        () => db.status == ConnectionStatus.connected && server.accepted == 2);
+    await db.query('RETURN 1');
   });
 }
