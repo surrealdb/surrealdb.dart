@@ -6,6 +6,7 @@ import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
 import 'session_state.dart';
@@ -99,6 +100,14 @@ class HttpEngine implements Engine {
       case 'authenticate':
       case 'invalidate':
       case 'let':
+        // Kept as it encodes now, so later changes to the caller's objects
+        // do not reach the value sent with each query. NONE removes the
+        // variable, so it is passed on as it is.
+        final keep = params.length > 1 && params[1] is! SurrealNone
+            ? (_codec.decode(_codec.encode(params)) as List).cast<Object?>()
+            : params;
+        _session.apply(method, keep, null);
+        return null;
       case 'unset':
       case 'reset':
         _session.apply(method, params, null);
@@ -140,12 +149,21 @@ class HttpEngine implements Engine {
       if (_session.namespace != null) 'Surreal-NS': _session.namespace!,
       if (_session.database != null) 'Surreal-DB': _session.database!,
     };
-    final request = _client.post(_url!, headers: headers, body: body);
+    // Completing this aborts the request, so a timed out request does not
+    // keep its connection open.
+    final abort = Completer<void>();
+    final request =
+        http.AbortableRequest('POST', _url!, abortTrigger: abort.future)
+          ..headers.addAll(headers)
+          ..bodyBytes = body;
+    final sending = _client.send(request).then(http.Response.fromStream);
     final timeout = _requestTimeout;
     final response = timeout == null
-        ? await request
-        : await request.timeout(timeout,
-            onTimeout: () => throw RequestTimeoutError(method, timeout));
+        ? await sending
+        : await sending.timeout(timeout, onTimeout: () {
+            abort.complete();
+            throw RequestTimeoutError(method, timeout);
+          });
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // Prefer the server's own error, when the body carries one.
       final error = _tryDecodeError(response.bodyBytes);

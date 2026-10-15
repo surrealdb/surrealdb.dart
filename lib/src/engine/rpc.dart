@@ -116,71 +116,204 @@ class RpcProtocol {
   }
 }
 
-/// A copy of [value] that later changes to the caller's maps, lists, sets
-/// and byte buffers do not reach, so a value kept to send again later is the
-/// value that was sent.
-Object? snapshotValue(Object? value) => switch (value) {
-      Uint8List() => Uint8List.fromList(value),
-      Map() => <Object?, Object?>{
-          for (final MapEntry(:key, :value) in value.entries)
-            snapshotValue(key): snapshotValue(value),
-        },
-      List() => [for (final item in value) snapshotValue(item)],
-      Set() => <Object?>{for (final item in value) snapshotValue(item)},
-      _ => value,
-    };
-
 /// Parses a record id in the string form the server writes in JSON, such as
-/// `person:tobie`, `person:42`, `person:`a b`` or `person:u'…'`. Returns
-/// null for array and object ids, which need a SurrealQL parser.
+/// `person:tobie`, `person:42`, `person:`a b``, `person:u'…'`,
+/// `person:[1, 'a']` or `person:{ a: 1 }`. Returns null when the string is
+/// not one this reader understands.
 RecordId? parseRecordId(String value) {
-  final (table, rest) = _readIdent(value, 0);
-  if (table == null || rest >= value.length || value[rest] != ':') {
-    return null;
-  }
-  final id = value.substring(rest + 1);
-  if (_integerId.hasMatch(id)) {
-    return RecordId(table, int.tryParse(id) ?? BigInt.parse(id));
-  }
-  final uuid = _uuidId.firstMatch(id);
-  if (uuid != null) {
-    return RecordId(table, Uuid(uuid.group(1) ?? uuid.group(2)!));
-  }
-  final (name, end) = _readIdent(id, 0);
-  if (name == null || end != id.length) return null;
-  return RecordId(table, name);
+  final reader = _SurqlReader(value);
+  final id = reader.recordId();
+  return reader.atEnd ? id : null;
 }
 
-final _integerId = RegExp(r'^-?\d+$');
-final _uuidId = RegExp(r'''^u(?:'([0-9a-fA-F-]{36})'|"([0-9a-fA-F-]{36})")$''');
-final _plainIdent = RegExp(r'[A-Za-z0-9_]');
+/// Reads the SurrealQL values that can appear in a record id. Throws
+/// [FormatException] on anything else.
+class _SurqlReader {
+  _SurqlReader(this._text);
 
-/// Reads an identifier at [start]: plain, or escaped with backticks or
-/// angle brackets. Returns it and the index after it.
-(String?, int) _readIdent(String value, int start) {
-  if (start >= value.length) return (null, start);
-  final open = value[start];
-  if (open == '`' || open == '⟨') {
-    final close = open == '`' ? '`' : '⟩';
+  final String _text;
+  var _i = 0;
+
+  bool get atEnd {
+    _skipSpace();
+    return _i == _text.length;
+  }
+
+  RecordId? recordId() {
+    try {
+      final table = _ident();
+      _expect(':');
+      return RecordId(table, _id());
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Object _id() {
+    final char = _peek();
+    if (char == '[' || char == '{') return _value()!;
+    if (char == 'u' && _isQuote(_peekAt(1))) return _value()!;
+    final number = _integer.matchAsPrefix(_text, _i);
+    if (number != null && !_isIdentChar(_peekAt(number.end - _i))) {
+      _i = number.end;
+      final digits = number.group(0)!;
+      return int.tryParse(digits) ?? BigInt.parse(digits);
+    }
+    return _ident();
+  }
+
+  Object? _value() {
+    _skipSpace();
+    final char = _peek();
+    switch (char) {
+      case '[':
+        _i++;
+        final items = <Object?>[];
+        while (true) {
+          _skipSpace();
+          if (_peek() == ']') break;
+          items.add(_value());
+          _skipSpace();
+          if (_peek() != ',') break;
+          _i++;
+        }
+        _expect(']');
+        return items;
+      case '{':
+        _i++;
+        final map = <String, Object?>{};
+        while (true) {
+          _skipSpace();
+          if (_peek() == '}') break;
+          final key = _isQuote(_peek()) ? _string() : _ident();
+          _expect(':');
+          map[key] = _value();
+          _skipSpace();
+          if (_peek() != ',') break;
+          _i++;
+        }
+        _expect('}');
+        return map;
+      case "'":
+      case '"':
+        return _string();
+    }
+    if ((char == 'd' || char == 'u') && _isQuote(_peekAt(1))) {
+      _i++;
+      final text = _string();
+      return char == 'd' ? SurrealDateTime.parse(text) : Uuid(text);
+    }
+    final duration = _duration.matchAsPrefix(_text, _i);
+    if (duration != null) {
+      _i = duration.end;
+      return SurrealDuration.parse(duration.group(0)!);
+    }
+    final number = _number.matchAsPrefix(_text, _i);
+    if (number != null) {
+      _i = number.end;
+      final digits = number.group(1)!;
+      return switch (number.group(2)) {
+        'dec' => Decimal(digits),
+        'f' => double.parse(digits),
+        _ when digits.contains(RegExp('[.eE]')) => double.parse(digits),
+        _ => int.tryParse(digits) ?? BigInt.parse(digits),
+      };
+    }
+    final start = _i;
+    final word = _ident();
+    switch (word) {
+      case 'true':
+        return true;
+      case 'false':
+        return false;
+      case 'NULL':
+        return null;
+      case 'NONE':
+        return none;
+    }
+    // A record id, such as `other:x`.
+    _i = start;
+    final nested = recordId();
+    if (nested == null) throw FormatException('Unexpected value', _text, start);
+    return nested;
+  }
+
+  String _string() {
+    final quote = _peek();
+    _i++;
     final buffer = StringBuffer();
-    var i = start + 1;
-    while (i < value.length) {
-      final char = value[i];
-      if (char == r'\' && i + 1 < value.length) {
-        buffer.write(value[i + 1]);
-        i += 2;
-      } else if (char == close) {
-        return (buffer.toString(), i + 1);
+    while (_i < _text.length) {
+      final char = _text[_i];
+      if (char == r'\' && _i + 1 < _text.length) {
+        buffer.write(_text[_i + 1]);
+        _i += 2;
+      } else if (char == quote) {
+        _i++;
+        return buffer.toString();
       } else {
         buffer.write(char);
-        i++;
+        _i++;
       }
     }
-    return (null, start);
+    throw FormatException('Unterminated string', _text, _i);
   }
-  var i = start;
-  while (i < value.length && _plainIdent.hasMatch(value[i])) {
-    i++;
+
+  /// An identifier: plain, or escaped with backticks or angle brackets.
+  String _ident() {
+    _skipSpace();
+    final open = _peek();
+    if (open == '`' || open == '⟨') {
+      final close = open == '`' ? '`' : '⟩';
+      final buffer = StringBuffer();
+      _i++;
+      while (_i < _text.length) {
+        final char = _text[_i];
+        if (char == r'\' && _i + 1 < _text.length) {
+          buffer.write(_text[_i + 1]);
+          _i += 2;
+        } else if (char == close) {
+          _i++;
+          return buffer.toString();
+        } else {
+          buffer.write(char);
+          _i++;
+        }
+      }
+      throw FormatException('Unterminated identifier', _text, _i);
+    }
+    final start = _i;
+    while (_i < _text.length && _isIdentChar(_text[_i])) {
+      _i++;
+    }
+    if (_i == start) throw FormatException('Expected a name', _text, _i);
+    return _text.substring(start, _i);
   }
-  return i == start ? (null, start) : (value.substring(start, i), i);
+
+  void _expect(String char) {
+    _skipSpace();
+    if (_peek() != char) throw FormatException('Expected $char', _text, _i);
+    _i++;
+  }
+
+  void _skipSpace() {
+    while (_i < _text.length && _text[_i] == ' ') {
+      _i++;
+    }
+  }
+
+  String? _peek() => _peekAt(0);
+
+  String? _peekAt(int offset) =>
+      _i + offset < _text.length ? _text[_i + offset] : null;
+
+  static bool _isQuote(String? char) => char == "'" || char == '"';
+
+  static bool _isIdentChar(String? char) =>
+      char != null && _identChar.hasMatch(char);
+
+  static final _identChar = RegExp('[A-Za-z0-9_]');
+  static final _integer = RegExp(r'-?\d+');
+  static final _number = RegExp(r'(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(dec|f)?');
+  static final _duration =
+      RegExp(r'(?:\d+(?:ns|µs|us|ms|s|m|h|d|w))+(?![A-Za-z0-9_])');
 }

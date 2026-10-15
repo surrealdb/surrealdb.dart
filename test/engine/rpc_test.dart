@@ -108,7 +108,33 @@ void main() {
         const RecordId('person', '12345678901234567890'));
     expect(parseRecordId("person:u'018f1c8e-7d2a-7cc0-9a1b-1234567890ab'"),
         RecordId('person', Uuid('018f1c8e-7d2a-7cc0-9a1b-1234567890ab')));
-    expect(parseRecordId("person:[1, 'a']"), isNull);
+    expect(
+        parseRecordId("person:[1, 'a']"), const RecordId('person', [1, 'a']));
+    expect(parseRecordId('person:[]'), const RecordId('person', []));
+    expect(parseRecordId('x:{ a: 1, "b c": \'d\', nested: { x: [1] } }')?.id, {
+      'a': 1,
+      'b c': 'd',
+      'nested': {
+        'x': [1],
+      },
+    });
+    final mixed = parseRecordId(
+        "person:[1.5f, 'a\\\\b', \"x'y\", `a b`:1, NULL, false, -3, 1.5dec, "
+        "1h30m, d'2024-01-01T00:00:00Z', u'018f1c8e-7d2a-7cc0-9a1b-1234567890ab']");
+    expect(mixed?.id, [
+      1.5,
+      r'a\b',
+      "x'y",
+      const RecordId('a b', 1),
+      null,
+      false,
+      -3,
+      const Decimal('1.5'),
+      SurrealDuration.parse('1h30m'),
+      SurrealDateTime.parse('2024-01-01T00:00:00Z'),
+      Uuid('018f1c8e-7d2a-7cc0-9a1b-1234567890ab'),
+    ]);
+    expect(parseRecordId('person:[1, '), isNull);
     expect(parseRecordId('person'), isNull);
   });
 }
