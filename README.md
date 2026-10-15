@@ -12,9 +12,11 @@ web, and desktop), since it depends only on portable packages.
 - Live queries delivered as a Dart `Stream`, with automatic reconnect and
   restart on the WebSocket engine.
 - The full RPC surface: `use`, `signin`, `signup`, `authenticate`, `invalidate`,
-  `info`, `set`, `unset`, `query`, `select`, `create`, `insert`,
+  `reset`, `info`, `set`, `unset`, `query`, `select`, `create`, `insert`,
   `insertRelation`, `update`, `upsert`, `merge`, `patch`, `delete`, `relate`,
-  `run`, `live`, `kill`, `import`, `export`, `version`, and `health`.
+  `run`, `live`, `liveOf`, `kill`, `import`, `export`, `version`, and `health`.
+- Session state (namespace, database, variables and authentication) that is
+  replayed after a WebSocket reconnect, and kept by the client over HTTP.
 - Native data types: `RecordId`, `StringRecordId`, `Table`, `Range`, `Uuid`,
   `Decimal`, `SurrealDuration`, `SurrealDateTime`, `SurrealFuture`, `FileRef`,
   the geometry types, Dart `Set`s, and `none` for NONE (distinct from `null`,
@@ -105,6 +107,11 @@ final subscription = live.stream.listen((message) {
 await subscription.cancel();
 await live.kill();
 ```
+
+To follow a live query started some other way, for example with a
+`LIVE SELECT` statement in `query`, attach to it by id with `liveOf`. Such a
+query cannot be restarted after a reconnect, so its stream then reports a
+`LiveQueryLostError` and closes.
 
 Live queries require the WebSocket engine. Calling `live` over the HTTP engine
 throws an `UnsupportedFeatureError`.
