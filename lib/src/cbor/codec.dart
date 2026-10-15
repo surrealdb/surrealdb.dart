@@ -228,10 +228,17 @@ class CborCodec implements SurrealCodec {
       case SurrealCborTags.specDatetime:
         return SurrealDateTime.parse(value as String);
       case SurrealCborTags.epochDatetime:
+        // Whole seconds stay exact; only a fractional epoch goes through
+        // floating point.
+        if (value is int) return SurrealDateTime(value, 0);
         final seconds = _toDouble(value);
-        return SurrealDateTime.fromDateTime(DateTime.fromMicrosecondsSinceEpoch(
-            (seconds * 1000000).round(),
-            isUtc: true));
+        var whole = seconds.floor();
+        var nanos = ((seconds - whole) * 1000000000).round();
+        if (nanos == 1000000000) {
+          whole++;
+          nanos = 0;
+        }
+        return SurrealDateTime(whole, nanos);
       case SurrealCborTags.datetime:
         final parts = (value as List).cast<int>();
         return SurrealDateTime(

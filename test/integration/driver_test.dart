@@ -195,5 +195,19 @@ void main() {
 
       await live.kill();
     });
+
+    test('a diff live query reports a compound record id over JSON', () async {
+      await db.query('DEFINE TABLE IF NOT EXISTS widget');
+      await db.query("CREATE widget:[1, 'a'] SET size = 1");
+      final live = await db.live('widget', diff: true);
+      final received = live.stream.first;
+
+      await db.query("UPDATE widget:[1, 'a'] SET size = 2");
+
+      final message = await received.timeout(const Duration(seconds: 5));
+      expect(message.recordId, const RecordId('widget', [1, 'a']));
+
+      await live.kill();
+    });
   }, skip: enabled ? false : 'set SURREAL_INTEGRATION=1 to run');
 }

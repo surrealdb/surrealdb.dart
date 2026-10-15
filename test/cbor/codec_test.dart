@@ -210,6 +210,20 @@ void main() {
       );
     });
 
+    test('epoch datetimes keep whole seconds exact', () {
+      // 1(1000000000001)
+      expect(
+        codec.decode([0xc1, 0x1b, 0, 0, 0, 0xe8, 0xd4, 0xa5, 0x10, 0x01]),
+        const SurrealDateTime(1000000000001, 0),
+      );
+      expect(codec.decode([0xc1, 0x20]), const SurrealDateTime(-1, 0));
+      // 1(1.5) and 1(-1.5)
+      expect(codec.decode([0xc1, 0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]),
+          const SurrealDateTime(1, 500000000));
+      expect(codec.decode([0xc1, 0xfb, 0xbf, 0xf8, 0, 0, 0, 0, 0, 0]),
+          const SurrealDateTime(-2, 500000000));
+    });
+
     test('floats of every width', () {
       expect(codec.decode([0xf9, 0x3c, 0x00]), 1.0); // half
       expect(codec.decode([0xf9, 0xc4, 0x00]), -4.0); // half
