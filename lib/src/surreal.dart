@@ -46,6 +46,7 @@ class Surreal {
   http.Client? _httpClient;
   StreamSubscription<ConnectionStatus>? _statusSubscription;
   final _statusController = StreamController<ConnectionStatus>.broadcast();
+  ConnectionStatus? _publishedStatus;
 
   String? _namespace;
   String? _database;
@@ -100,7 +101,7 @@ class Surreal {
     engine.onReconnect = _restartLiveQueries;
     engine.onAuthenticationLost = (_) => _accessToken = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
-    _statusSubscription = engine.statusChanges.listen(_statusController.add);
+    _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
     await engine.open(uri, timeout: options.timeout);
 
@@ -143,16 +144,27 @@ class Surreal {
     }
     final engine = _engine;
     _engine = null;
-    await engine?.close();
-    await _statusSubscription?.cancel();
-    _statusSubscription = null;
-    if (engine != null) _statusController.add(ConnectionStatus.disconnected);
-    _httpClient?.close();
-    _httpClient = null;
-    _namespace = null;
-    _database = null;
-    _accessToken = null;
-    _version = null;
+    try {
+      await engine?.close();
+    } finally {
+      await _statusSubscription?.cancel();
+      _statusSubscription = null;
+      // The engine's own event may not have been forwarded before the
+      // subscription was cancelled; publishing only changes sends it once.
+      if (engine != null) _publishStatus(ConnectionStatus.disconnected);
+      _httpClient?.close();
+      _httpClient = null;
+      _namespace = null;
+      _database = null;
+      _accessToken = null;
+      _version = null;
+    }
+  }
+
+  void _publishStatus(ConnectionStatus status) {
+    if (status == _publishedStatus) return;
+    _publishedStatus = status;
+    _statusController.add(status);
   }
 
   /// Returns the server version string, for example `2.1.0`.
