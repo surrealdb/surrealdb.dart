@@ -144,5 +144,18 @@ void main() {
       expect(errors.single, isA<LiveQueryLostError>());
       expect(server.methods, isNot(contains('live')));
     });
+
+    test('a paused listener does not hold up the other restarts', () async {
+      final attached = db.liveOf(id);
+      final subscription = attached.stream.listen(null, onError: (_) {});
+      subscription.pause();
+      final own = await db.live('person');
+      final before = own.id;
+
+      await server.dropAll();
+      await eventually(() => own.id != before);
+      expect(db.status, ConnectionStatus.connected);
+      await subscription.cancel();
+    });
   });
 }

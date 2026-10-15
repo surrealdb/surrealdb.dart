@@ -1,6 +1,8 @@
 @TestOn('vm')
 library;
 
+import 'dart:async';
+
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -82,6 +84,7 @@ void main() {
     server.handler = (r) => switch (r.method) {
           // Never sends the end, as a long query would not yet.
           'query_stream' => FakeResults(frames.sublist(0, 2)),
+          'query_cancel' => _endStream(server, r),
           _ => FakeSurrealServer.defaultReply(r),
         };
     final first = await db.queryStream('SELECT * FROM big').first;
@@ -90,6 +93,54 @@ void main() {
         server.requests.lastWhere((r) => r.method == 'query_stream').id;
     await eventually(() => server.methods.contains('query_cancel'));
     expect(server.requests.last.params, [requestId]);
+  });
+
+  test('a cancelled stream in a transaction ends before the commit', () async {
+    final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
+    await connect('surrealdb-3.3.4');
+    var ended = false;
+    bool? committedAfterEnd;
+    server.handler = (r) {
+      switch (r.method) {
+        case 'begin':
+          return FakeResult(txn);
+        case 'query_stream':
+          return FakeResults(frames.sublist(0, 2));
+        case 'query_cancel':
+          // The server ends the stream a little after it acknowledges.
+          Timer(const Duration(milliseconds: 200), () {
+            ended = true;
+            server.push({
+              'id': r.params.first,
+              'result': {'stream': 'end', 'results': 0, 'time': '1ms'},
+            });
+          });
+          return const FakeResult(null);
+        case 'commit':
+          committedAfterEnd = ended;
+          return const FakeResult(null);
+        default:
+          return FakeSurrealServer.defaultReply(r);
+      }
+    };
+    final transaction = await db.beginTransaction();
+    await transaction.queryStream('SELECT * FROM big').first;
+    await transaction.commit();
+    expect(committedAfterEnd, isTrue);
+  });
+
+  test('a stream with no first reply times out', () async {
+    await db.connect(server.url,
+        options: const ConnectOptions(
+            versionCheck: false, requestTimeout: Duration(milliseconds: 300)));
+    server.handler = (r) => switch (r.method) {
+          'query_stream' => const FakeSilence(),
+          'query_cancel' => _endStream(server, r),
+          _ => FakeSurrealServer.defaultReply(r),
+        };
+    await expectLater(
+        db.queryStream('q').toList(), throwsA(isA<RequestTimeoutError>()));
+    await eventually(() => server.methods.contains('query_cancel'));
   });
 
   test('falls back to a buffered query before 3.3', () async {
@@ -181,4 +232,14 @@ void main() {
     await transaction.queryStream('q').drain<void>();
     expect(server.requests.last.raw['txn'], txn);
   });
+}
+
+/// Acknowledges a `query_cancel` and ends the stream it names, as the server
+/// does.
+FakeReply _endStream(FakeSurrealServer server, FakeRequest request) {
+  server.push({
+    'id': request.params.first,
+    'result': {'stream': 'end', 'results': 0, 'time': '1ms'},
+  });
+  return const FakeResult(null);
 }

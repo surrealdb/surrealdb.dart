@@ -108,6 +108,7 @@ enum ErrorKind {
   /// a kind.
   static ErrorKind fromCode(int? code) => switch (code) {
         -32700 || -32600 || -32603 => validation,
+        -32001 => connection,
         -32601 => notFound,
         -32602 || -32002 => notAllowed,
         -32604 || -32605 || -32606 || -32607 => configuration,
@@ -239,6 +240,16 @@ class ServerError extends ResponseError {
       {int? index}) {
     final rawKind =
         statement['kind'] is String ? statement['kind'] as String : null;
+    var details = statement['details'];
+    // 3.0.0 wraps the detail in another carrying the error's own kind.
+    if (details is Map &&
+        rawKind != null &&
+        details['kind'] == rawKind &&
+        details['details'] is Map &&
+        (details['details'] as Map)['kind'] is String) {
+      details = details['details'];
+    }
+    final cause = statement['cause'];
     return ServerError.of(
       statement['result']?.toString() ?? 'Query statement failed',
       // Servers before 3.0 send no kind, so nothing says what went wrong.
@@ -246,7 +257,8 @@ class ServerError extends ResponseError {
       kind: rawKind != null ? ErrorKind.parse(rawKind) : ErrorKind.internal,
       rawKind: rawKind,
       code: 0,
-      details: ErrorDetail.fromWire(statement['details']),
+      details: ErrorDetail.fromWire(details),
+      cause: cause is Map ? ServerError.fromRpc(cause) : null,
       statementIndex: index,
     );
   }
