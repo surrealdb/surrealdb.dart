@@ -470,7 +470,9 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   /// The document must start with `OPTION IMPORT;`, as exports do. The
   /// import is not atomic: statements run one by one, and those that fail do
   /// not stop the rest. When any fail, this throws an [ImportError] listing
-  /// them, after the others have been applied.
+  /// them, after the others have been applied. If the server's reply does
+  /// not say how the statements went, this throws a [ResponseError] rather
+  /// than report an import it could not check as complete.
   Future<void> import(String surql) async {
     final response = await _http.post(
       _httpBase().replace(path: '/import'),
@@ -489,6 +491,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
         statusCode: response.statusCode,
       );
     }
+    if (failures == null) {
+      throw const ResponseError(
+          'The server did not report how the imported statements went, so '
+          'the import could not be checked');
+    }
   }
 
   /// The failed statements in an `/import` response, or null when the body
@@ -499,7 +506,12 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     try {
       decoded = _codec.decode(body);
     } catch (_) {
-      return null;
+      // A server may answer in JSON whatever was asked for.
+      try {
+        decoded = jsonDecode(utf8.decode(body));
+      } catch (_) {
+        return null;
+      }
     }
     if (decoded is! List) return null;
     return [
@@ -524,17 +536,28 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
 
   /// Exports the current namespace and database as a SurrealQL document,
   /// over the server's HTTP `/export` endpoint. Works with either engine.
-  /// [options] choose what to include; servers before 2.1 ignore them.
+  /// [options] choose what to include. Servers before 2.1 cannot take them,
+  /// so they are ignored there and everything is exported.
   Future<String> export({ExportOptions? options}) async {
     final uri = _httpBase().replace(path: '/export');
-    final response = options == null
-        ? await _http.get(uri, headers: _httpHeaders(accept: 'text/plain'))
+    Future<http.Response> exportAll() =>
+        _http.get(uri, headers: _httpHeaders(accept: 'text/plain'));
+    final version = _parseVersion(_version ?? '');
+    final takesOptions =
+        version == null || _compareVersions(version, const [2, 1, 0]) >= 0;
+    var response = options == null || !takesOptions
+        ? await exportAll()
         : await _http.post(
             uri,
             headers: _httpHeaders(
                 contentType: _codec.contentType, accept: 'text/plain'),
             body: _codec.encode(options.toJson()),
           );
+    // A server whose version was not checked may still be one that only
+    // exports with GET.
+    if (response.statusCode == 405 && options != null) {
+      response = await exportAll();
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
         'Export failed with status ${response.statusCode}'

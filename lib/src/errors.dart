@@ -602,9 +602,10 @@ class ImportError extends SurrealError {
             '${failures.length == 1 ? '' : 's'} failed to import: '
             '${failures.first.message}');
 
-  /// The error of each failed statement, in document order. The server
-  /// reports only the failed statements, so [ServerError.statementIndex] is
-  /// the position among the failures, not in the document.
+  /// The error of each failed statement, in document order. Servers from
+  /// 3.0 report only the failed statements, so there
+  /// [ServerError.statementIndex] is the position among the failures; older
+  /// servers report every statement, so it is the position in the document.
   final List<ServerError> failures;
 
   /// How many statements failed.
