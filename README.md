@@ -108,6 +108,28 @@ await live.kill();
 Live queries require the WebSocket engine. Calling `live` over the HTTP engine
 throws an `UnsupportedFeatureError`.
 
+### Errors
+
+Errors the server reports are thrown as a `ServerError`, with the server's
+`kind`, JSON-RPC `code` and structured `details`. Each kind has its own
+subclass: `ValidationError`, `ConfigurationError`, `QueryError`,
+`SerializationError`, `NotAllowedError`, `NotFoundError`, `AlreadyExistsError`,
+`ServerConnectionError`, `ThrownError`, `InternalError` and `ContextError`.
+
+```dart
+try {
+  await db.query('SELECT * FROM person');
+} on NotFoundError catch (error) {
+  print('No such table: ${error.tableName}');
+} on NotAllowedError catch (error) {
+  if (error.isTokenExpired) await db.signin(credentials);
+}
+```
+
+A failed statement in a `query` batch is thrown the same way, with
+`statementIndex` set to its position. Use `queryRaw` to get every statement's
+status without throwing.
+
 ### Serialization format
 
 The driver speaks CBOR by default, which carries the SurrealDB types without
