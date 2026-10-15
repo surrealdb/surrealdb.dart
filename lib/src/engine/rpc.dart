@@ -195,10 +195,15 @@ class _SurqlReader {
       case '"':
         return _string();
     }
-    if ((char == 'd' || char == 'u') && _isQuote(_peekAt(1))) {
+    if ((char == 'd' || char == 'u' || char == 'b') && _isQuote(_peekAt(1))) {
+      final start = _i;
       _i++;
       final text = _string();
-      return char == 'd' ? SurrealDateTime.parse(text) : Uuid(text);
+      return switch (char) {
+        'd' => SurrealDateTime.parse(text),
+        'u' => Uuid(text),
+        _ => _bytes(text, start),
+      };
     }
     final duration = _duration.matchAsPrefix(_text, _i);
     if (duration != null) {
@@ -260,6 +265,16 @@ class _SurqlReader {
   static Object _wholeNumber(String digits) {
     final value = BigInt.parse(digits);
     return value.isValidInt ? value.toInt() : value;
+  }
+
+  /// The bytes written in hexadecimal as [text], as in `b"7879"`.
+  Uint8List _bytes(String text, int start) {
+    if (text.length.isOdd) throw FormatException('Invalid bytes', _text, start);
+    return Uint8List.fromList([
+      for (var i = 0; i < text.length; i += 2)
+        int.tryParse(text.substring(i, i + 2), radix: 16) ??
+            (throw FormatException('Invalid bytes', _text, start)),
+    ]);
   }
 
   /// Reads the character after a backslash in a string, and any digits of a
