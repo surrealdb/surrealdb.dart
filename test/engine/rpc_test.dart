@@ -135,6 +135,10 @@ void main() {
       SurrealDateTime.parse('2024-01-01T00:00:00Z'),
       Uuid('018f1c8e-7d2a-7cc0-9a1b-1234567890ab'),
     ]);
+    expect(parseRecordId('event:[1y, 2y3w]')?.id, [
+      SurrealDuration.days(365),
+      SurrealDuration.days(2 * 365 + 21),
+    ]);
     // Strings are written with escapes, as the server writes them.
     expect(
         parseRecordId(
