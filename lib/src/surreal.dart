@@ -54,6 +54,7 @@ class Surreal {
   String? _database;
   String? _accessToken;
   String? _version;
+  var _versionCheck = true;
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
   StreamSubscription<LiveMessage>? _liveSubscription;
@@ -100,7 +101,8 @@ class Surreal {
     final engine = _engineFor(uri, options);
     _engine = engine;
     _url = uri;
-    engine.onReconnect = _restartLiveQueries;
+    _versionCheck = options.versionCheck;
+    engine.onReconnect = _onReconnect;
     engine.onAuthenticationLost = (_) => _accessToken = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_statusController.add);
@@ -388,6 +390,24 @@ class Surreal {
   /// Starts every registered live query again after a reconnect. Each query
   /// is restarted on its own: one that fails keeps its registration, receives
   /// the error on its stream, and is tried again on the next reconnect.
+  /// Runs after the WebSocket engine reconnects. The server behind the URL
+  /// may have changed, so its version is checked again before live queries
+  /// are restarted. An unsupported server closes the client.
+  Future<void> _onReconnect() async {
+    if (_versionCheck) {
+      try {
+        await _checkVersion();
+      } on UnsupportedVersionError catch (error, stackTrace) {
+        for (final registration in List.of(_liveByUuid.values)) {
+          registration.query.emitError(error, stackTrace);
+        }
+        await close();
+        return;
+      }
+    }
+    await _restartLiveQueries();
+  }
+
   Future<void> _restartLiveQueries() async {
     for (final entry in _liveByUuid.entries.toList()) {
       final oldId = entry.key;
