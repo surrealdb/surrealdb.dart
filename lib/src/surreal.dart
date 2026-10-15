@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
 import 'engine/session_state.dart';
@@ -145,6 +146,15 @@ class Surreal {
         await close();
         rethrow;
       }
+      // Servers before 3.0 have no set type and reject its CBOR tag.
+      final codec = engine.codec;
+      final major = _parseVersion(_version ?? '')?.first;
+      if (codec is CborCodec &&
+          !codec.setsAsArrays &&
+          major != null &&
+          major < 3) {
+        engine.codec = const CborCodec(setsAsArrays: true);
+      }
     }
     if (options.namespace != null || options.database != null) {
       await use(
@@ -248,6 +258,13 @@ class Surreal {
   // Session
   // ---------------------------------------------------------------------------
 
+  /// Whether a `use` call can carry NONE to keep a value. A JSON WebSocket
+  /// cannot; over HTTP the client applies `use` itself.
+  bool get _canSendNone {
+    final engine = _engine;
+    return engine is! WebSocketEngine || engine.codec is CborCodec;
+  }
+
   /// Selects the [namespace] and [database] for subsequent operations.
   ///
   /// An argument that is left out keeps its current value, and an argument
@@ -273,12 +290,24 @@ class Surreal {
     // A value that stays the same is sent as it is when it is known, so that
     // codecs without NONE (JSON) do not clear it, and as NONE otherwise.
     final clearNamespace = !keepNamespace && namespace == null;
+    Object? currentNamespace = _session.namespace ?? none;
+    Object? currentDatabase = _session.database ?? none;
+    final unknown = (keepNamespace && currentNamespace is SurrealNone) ||
+        (!clearNamespace && keepDatabase && currentDatabase is SurrealNone);
+    if (unknown && !_canSendNone) {
+      // NONE would arrive as null and clear the value, so ask the server
+      // what it has selected and send that back.
+      final [selected] = await query('RETURN [session::ns(), session::db()]');
+      final [ns, db] = selected! as List<Object?>;
+      if (currentNamespace is SurrealNone) currentNamespace = ns;
+      if (currentDatabase is SurrealNone) currentDatabase = db;
+    }
     await _rpc('use', [
-      keepNamespace ? (_session.namespace ?? none) : namespace,
+      keepNamespace ? currentNamespace : namespace,
       clearNamespace
           ? null
           : keepDatabase
-              ? (_session.database ?? none)
+              ? currentDatabase
               : database,
     ]);
   }
@@ -557,6 +586,10 @@ class Surreal {
     if (!engine.supportsLiveQueries) {
       throw const UnsupportedFeatureError('live');
     }
+    // The handle for a query that is already registered is shared, so that
+    // killing one does not leave another open.
+    final existing = _liveByUuid[id.toString()];
+    if (existing != null) return existing.query;
     final query = LiveQuery(id, _killLive);
     _liveByUuid[id.toString()] = _LiveRegistration(query, null, false);
     return query;
