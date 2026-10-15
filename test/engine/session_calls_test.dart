@@ -49,6 +49,43 @@ void main() {
       expect(lastParams('use'), [none, 'db']);
     });
 
+    test('a cleared selection is cleared again after authenticating', () async {
+      await db.authenticate('token');
+      await db.use(namespace: 'ns', database: 'db');
+      await db.use(namespace: null);
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(server.methods, ['authenticate', 'use']);
+      expect(lastParams('use'), [null, null]);
+    });
+
+    test('a new connection starts with nothing known, not cleared', () async {
+      await db.use(namespace: null);
+      await db.close();
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      server.handler = (r) => r.method == 'use'
+          ? const FakeResult(null)
+          : FakeSurrealServer.defaultReply(r);
+      await db.authenticate('token');
+      await db.use(database: 'db');
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 3);
+      expect(lastParams('use'), [none, 'db']);
+    });
+
     test('a cleared namespace is cleared again after a reconnect', () async {
       await db.use(namespace: 'ns', database: 'db');
       await db.use(namespace: null);

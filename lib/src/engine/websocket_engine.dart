@@ -222,10 +222,14 @@ class WebSocketEngine implements Engine {
           _firstFrame[requestId] = Timer(timeout, () {
             _firstFrame.remove(requestId);
             if (_streams.remove(requestId) == null) return;
-            unawaited(_cancelOnServer(requestId, session));
-            controller
-              ..addError(RequestTimeoutError(method, timeout))
-              ..close();
+            // The error comes once the query has stopped, so that a
+            // transaction is not committed while it still runs.
+            unawaited(_cancelOnServer(requestId, session).whenComplete(() {
+              if (controller.isClosed) return;
+              controller
+                ..addError(RequestTimeoutError(method, timeout))
+                ..close();
+            }));
           });
         }
       },
@@ -246,16 +250,26 @@ class WebSocketEngine implements Engine {
   }
 
   /// Cancels the stream [requestId] on the server, and completes once the
-  /// server has ended it, or after the request timeout.
+  /// server has ended it.
+  ///
+  /// If the server refuses the cancel, or does not end the stream within the
+  /// request timeout, the query may still be running. The socket is then
+  /// dropped, which stops it, and the usual reconnect follows.
   Future<void> _cancelOnServer(String requestId, Uuid? session) {
+    final channel = _channel;
     final ended = Completer<void>();
     _cancelling[requestId] = ended;
+    void abandon() {
+      if (channel != null) _resetChannel(channel);
+      _ended(requestId);
+    }
+
     unawaited(_call('query_cancel', [requestId], session: session)
-        .then((_) {}, onError: (_) => _ended(requestId)));
+        .then((_) {}, onError: (_) => abandon()));
     final timeout = _requestTimeout;
     return timeout == null
         ? ended.future
-        : ended.future.timeout(timeout, onTimeout: () => _ended(requestId));
+        : ended.future.timeout(timeout, onTimeout: abandon);
   }
 
   void _ended(String requestId) => _cancelling.remove(requestId)?.complete();
@@ -312,6 +326,9 @@ class WebSocketEngine implements Engine {
     'refresh',
     'attach',
     'detach',
+    'begin',
+    'commit',
+    'cancel',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -487,6 +504,9 @@ class WebSocketEngine implements Engine {
     }
     if (!known && (namespace is String || database is String)) {
       await _useKeeping(namespace, database, session);
+    } else if (namespace == null && token != null) {
+      // Cleared, but authenticating may have selected them again.
+      await _call('use', [null, null], session: session);
     }
   }
 
