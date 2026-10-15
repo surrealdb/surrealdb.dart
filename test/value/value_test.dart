@@ -86,4 +86,58 @@ void main() {
       });
     });
   });
+
+  group('times before the epoch', () {
+    test('a datetime before 1970 keeps its seconds', () {
+      final value = SurrealDateTime.fromDateTime(
+          DateTime.utc(1969, 12, 31, 23, 59, 59, 500));
+      expect(value.seconds, -1);
+      expect(value.nanoseconds, 500000000);
+      expect(value.toDateTime(), DateTime.utc(1969, 12, 31, 23, 59, 59, 500));
+    });
+
+    test('a datetime one microsecond before the epoch', () {
+      final value = SurrealDateTime.fromDateTime(
+          DateTime.fromMicrosecondsSinceEpoch(-1, isUtc: true));
+      expect(value.seconds, -1);
+      expect(value.nanoseconds, 999999000);
+    });
+
+    test('a whole-second datetime before 1970', () {
+      final value = SurrealDateTime.fromDateTime(DateTime.utc(1900));
+      expect(value.seconds, -2208988800);
+      expect(value.nanoseconds, 0);
+      expect(value.toString(), '1900-01-01T00:00:00.000Z');
+    });
+
+    test('a negative duration keeps its seconds', () {
+      final value =
+          SurrealDuration.fromDart(const Duration(milliseconds: -1500));
+      expect(value.seconds, -2);
+      expect(value.nanoseconds, 500000000);
+      expect(value.toDart(), const Duration(milliseconds: -1500));
+      expect(value.toString(), '-1s500ms');
+      expect(value.isNegative, isTrue);
+    });
+
+    test('negative nanoseconds', () {
+      final value = SurrealDuration.nanoseconds(-1);
+      expect(value.seconds, -1);
+      expect(value.nanoseconds, 999999999);
+      expect(value.inNanoseconds, -1);
+      expect(value.toString(), '-1ns');
+    });
+
+    test('a negative duration parses back from its string', () {
+      for (final value in [
+        SurrealDuration.fromDart(const Duration(milliseconds: -1500)),
+        SurrealDuration.nanoseconds(-1),
+        SurrealDuration.weeks(-3),
+      ]) {
+        expect(SurrealDuration.parse(value.toString()), value);
+      }
+      expect(() => SurrealDuration.parse('-'), throwsFormatException);
+      expect(() => SurrealDuration.parse('--1s'), throwsFormatException);
+    });
+  });
 }
