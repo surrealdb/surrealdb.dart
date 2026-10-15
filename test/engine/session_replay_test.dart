@@ -51,4 +51,29 @@ void main() {
       ],
     ]);
   });
+
+  test('a replayed variable keeps the value that was sent', () async {
+    final value = {
+      'list': [1],
+      'nested': {'a': 1},
+    };
+    await db.set('kept', value);
+    (value['list']! as List).add(2);
+    (value['nested']! as Map)['a'] = 2;
+    value['extra'] = 3;
+    server.requests.clear();
+
+    await server.dropAll();
+    await eventually(
+        () => db.status == ConnectionStatus.connected && server.accepted == 2);
+
+    final let = server.requests.singleWhere((r) => r.method == 'let');
+    expect(let.params, [
+      'kept',
+      {
+        'list': [1],
+        'nested': {'a': 1},
+      },
+    ]);
+  });
 }

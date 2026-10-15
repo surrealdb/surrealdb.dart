@@ -92,6 +92,9 @@ class RpcProtocol {
     final record = result['record'];
     if (record is RecordId) {
       recordId = record;
+    } else if (record is String) {
+      // The JSON format sends it as a string.
+      recordId = parseRecordId(record);
     } else if (value is Map && value['id'] is RecordId) {
       recordId = value['id'] as RecordId;
     }
@@ -108,4 +111,73 @@ class RpcProtocol {
     if (value is String) return Uuid(value);
     return null;
   }
+}
+
+/// A copy of [value] that later changes to the caller's maps, lists, sets
+/// and byte buffers do not reach, so a value kept to send again later is the
+/// value that was sent.
+Object? snapshotValue(Object? value) => switch (value) {
+      Uint8List() => Uint8List.fromList(value),
+      Map() => <Object?, Object?>{
+          for (final MapEntry(:key, :value) in value.entries)
+            snapshotValue(key): snapshotValue(value),
+        },
+      List() => [for (final item in value) snapshotValue(item)],
+      Set() => <Object?>{for (final item in value) snapshotValue(item)},
+      _ => value,
+    };
+
+/// Parses a record id in the string form the server writes in JSON, such as
+/// `person:tobie`, `person:42`, `person:`a b`` or `person:u'…'`. Returns
+/// null for array and object ids, which need a SurrealQL parser.
+RecordId? parseRecordId(String value) {
+  final (table, rest) = _readIdent(value, 0);
+  if (table == null || rest >= value.length || value[rest] != ':') {
+    return null;
+  }
+  final id = value.substring(rest + 1);
+  if (_integerId.hasMatch(id)) {
+    return RecordId(table, int.tryParse(id) ?? BigInt.parse(id));
+  }
+  final uuid = _uuidId.firstMatch(id);
+  if (uuid != null) {
+    return RecordId(table, Uuid(uuid.group(1) ?? uuid.group(2)!));
+  }
+  final (name, end) = _readIdent(id, 0);
+  if (name == null || end != id.length) return null;
+  return RecordId(table, name);
+}
+
+final _integerId = RegExp(r'^-?\d+$');
+final _uuidId = RegExp(r'''^u(?:'([0-9a-fA-F-]{36})'|"([0-9a-fA-F-]{36})")$''');
+final _plainIdent = RegExp(r'[A-Za-z0-9_]');
+
+/// Reads an identifier at [start]: plain, or escaped with backticks or
+/// angle brackets. Returns it and the index after it.
+(String?, int) _readIdent(String value, int start) {
+  if (start >= value.length) return (null, start);
+  final open = value[start];
+  if (open == '`' || open == '⟨') {
+    final close = open == '`' ? '`' : '⟩';
+    final buffer = StringBuffer();
+    var i = start + 1;
+    while (i < value.length) {
+      final char = value[i];
+      if (char == r'\' && i + 1 < value.length) {
+        buffer.write(value[i + 1]);
+        i += 2;
+      } else if (char == close) {
+        return (buffer.toString(), i + 1);
+      } else {
+        buffer.write(char);
+        i++;
+      }
+    }
+    return (null, start);
+  }
+  var i = start;
+  while (i < value.length && _plainIdent.hasMatch(value[i])) {
+    i++;
+  }
+  return i == start ? (null, start) : (value.substring(start, i), i);
 }
