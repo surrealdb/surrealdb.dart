@@ -42,6 +42,7 @@ class WebSocketEngine implements Engine {
   String? _namespace;
   String? _database;
   String? _token;
+  final Map<String, Object?> _variables = {};
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
@@ -181,6 +182,16 @@ class WebSocketEngine implements Engine {
         if (params.isNotEmpty) _token = params[0] as String?;
       case 'invalidate':
         _token = null;
+      case 'let':
+        final key = params[0] as String;
+        // `let` without a value removes the variable, as on the server.
+        if (params.length > 1) {
+          _variables[key] = params[1];
+        } else {
+          _variables.remove(key);
+        }
+      case 'unset':
+        _variables.remove(params[0] as String);
     }
   }
 
@@ -259,6 +270,9 @@ class WebSocketEngine implements Engine {
   Future<void> _restoreSession() async {
     if (_namespace != null || _database != null) {
       await _call('use', [_namespace, _database]);
+    }
+    for (final MapEntry(:key, :value) in _variables.entries) {
+      await _call('let', [key, value]);
     }
     final token = _token;
     if (token != null) {
