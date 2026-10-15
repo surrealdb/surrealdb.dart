@@ -9,6 +9,17 @@ class SurrealCborTags {
   /// RFC 3339 datetime string. Decode only, the client emits [datetime].
   static const int specDatetime = 0;
 
+  /// Datetime as seconds since the Unix epoch. Decode only.
+  static const int epochDatetime = 1;
+
+  /// Unsigned integer too large for a CBOR integer, as big-endian bytes.
+  /// Decode only.
+  static const int positiveBignum = 2;
+
+  /// Negative integer too large for a CBOR integer, as big-endian bytes.
+  /// Decode only.
+  static const int negativeBignum = 3;
+
   /// SurrealDB NONE, encoded as a tagged null.
   static const int none = 6;
 

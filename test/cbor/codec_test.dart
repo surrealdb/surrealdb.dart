@@ -148,4 +148,87 @@ void main() {
       expect(roundTrip(record), record);
     });
   });
+
+  group('range bounds', () {
+    test('exclusive integer bounds stay exclusive', () {
+      // 49([50(1), 51(5)]), the server's encoding of 1..5
+      final decoded =
+          codec.decode([0xd8, 49, 0x82, 0xd8, 50, 0x01, 0xd8, 51, 0x05]);
+      expect(
+        decoded,
+        const Range(begin: BoundIncluded(1), end: BoundExcluded(5)),
+      );
+    });
+
+    test('exclusive bounds round trip', () {
+      for (final range in const [
+        Range(begin: BoundExcluded(1), end: BoundIncluded(5)),
+        Range(begin: BoundExcluded(-3), end: BoundExcluded(4000000000)),
+        Range(end: BoundExcluded(5)),
+        Range(begin: BoundExcluded(1.5)),
+      ]) {
+        expect(roundTrip(range), range);
+      }
+    });
+
+    test('a record id range keeps its exclusive bound', () {
+      const range = RecordIdRange('person',
+          begin: BoundIncluded(1), end: BoundExcluded(10));
+      expect(roundTrip(range), range);
+    });
+  });
+
+  group('decoder', () {
+    test('integers of every width', () {
+      for (final value in [
+        0,
+        23,
+        24,
+        255,
+        256,
+        65535,
+        65536,
+        4294967295,
+        4294967296,
+        9007199254740991,
+        -1,
+        -24,
+        -25,
+        -256,
+        -65537,
+        -4294967297,
+      ]) {
+        expect(roundTrip(value), value, reason: '$value');
+      }
+    });
+
+    test('integers beyond the 53-bit safe range become BigInt', () {
+      // 0x1b ffffffffffffffff does not fit in an int on any platform.
+      expect(
+        codec.decode([0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        BigInt.parse('18446744073709551615'),
+      );
+    });
+
+    test('floats of every width', () {
+      expect(codec.decode([0xf9, 0x3c, 0x00]), 1.0); // half
+      expect(codec.decode([0xf9, 0xc4, 0x00]), -4.0); // half
+      expect(codec.decode([0xfa, 0x47, 0xc3, 0x50, 0x00]), 100000.0); // single
+      expect(roundTrip(1.1), 1.1); // double
+    });
+
+    test('indefinite length items', () {
+      // [_ 1, [2]], {_ "a": 1}, (_ "ab" "c")
+      expect(codec.decode([0x9f, 0x01, 0x81, 0x02, 0xff]), [
+        1,
+        [2]
+      ]);
+      expect(codec.decode([0xbf, 0x61, 0x61, 0x01, 0xff]), {'a': 1});
+      expect(codec.decode([0x7f, 0x62, 0x61, 0x62, 0x61, 0x63, 0xff]), 'abc');
+    });
+
+    test('rejects truncated input', () {
+      expect(() => codec.decode([0x82, 0x01]), throwsFormatException);
+    });
+  });
 }
