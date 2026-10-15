@@ -56,6 +56,9 @@ class HttpEngine implements Engine {
   set onReconnect(Future<void> Function()? handler) {}
 
   @override
+  set onAuthenticationLost(void Function(Object error)? handler) {}
+
+  @override
   Future<void> open(Uri url,
       {Duration timeout = const Duration(seconds: 30)}) async {
     _url = url;
