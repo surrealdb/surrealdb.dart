@@ -50,6 +50,7 @@ class Surreal {
   http.Client? _httpClient;
   StreamSubscription<ConnectionStatus>? _statusSubscription;
   final _statusController = StreamController<ConnectionStatus>.broadcast();
+  ConnectionStatus? _publishedStatus;
 
   String? _namespace;
   String? _database;
@@ -107,10 +108,11 @@ class Surreal {
     _engine = engine;
     _url = uri;
     _versionCheck = options.versionCheck;
-    engine.onReconnect = _onReconnect;
+    engine.onVerify = _verifyServer;
+    engine.onReconnect = _restartLiveQueries;
     engine.onAuthenticationLost = (_) => _accessToken = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
-    _statusSubscription = engine.statusChanges.listen(_statusController.add);
+    _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
     _ownCodec = options.codec == null;
     await engine.open(uri, timeout: options.timeout);
@@ -168,23 +170,32 @@ class Surreal {
     }
     final engine = _engine;
     _engine = null;
-    await engine?.close();
-    await _statusSubscription?.cancel();
-    _statusSubscription = null;
-    if (engine != null) _statusController.add(ConnectionStatus.disconnected);
-    _httpClient?.close();
-    _httpClient = null;
-    _namespace = null;
-    _database = null;
-    _accessToken = null;
-    _version = null;
+    try {
+      await engine?.close();
+    } finally {
+      await _statusSubscription?.cancel();
+      _statusSubscription = null;
+      // The engine's own event may not have been forwarded before the
+      // subscription was cancelled; publishing only changes sends it once.
+      if (engine != null) _publishStatus(ConnectionStatus.disconnected);
+      _httpClient?.close();
+      _httpClient = null;
+      _namespace = null;
+      _database = null;
+      _accessToken = null;
+      _version = null;
+    }
+  }
+
+  void _publishStatus(ConnectionStatus status) {
+    if (status == _publishedStatus) return;
+    _publishedStatus = status;
+    _statusController.add(status);
   }
 
   /// Returns the server version string, for example `2.1.0`.
   Future<String> version() async {
-    final result = await _rpc('version');
-    final version =
-        result is Map ? result['version']?.toString() : result?.toString();
+    final version = _versionOf(await _rpc('version'));
     _version = version;
     _adaptCodec();
     return version ?? '';
@@ -205,6 +216,9 @@ class Surreal {
       engine.codec = CborCodec(setsAsArrays: arrays);
     }
   }
+
+  static String? _versionOf(Object? result) =>
+      result is Map ? result['version']?.toString() : result?.toString();
 
   /// Checks that the server is reachable and healthy. Throws on failure.
   Future<void> health() async {
@@ -228,6 +242,28 @@ class Surreal {
       throw UnsupportedVersionError(
           version, minimumServerVersion, maximumServerVersion);
     }
+  }
+
+  /// Runs when the WebSocket engine reconnects, before the session is
+  /// restored. The server behind the URL may have changed, so its version is
+  /// checked again. An unsupported server closes the client; any other
+  /// failure fails the attempt, which the engine tries again.
+  Future<void> _verifyServer(
+      Future<Object?> Function(String method, List<Object?> params)
+          call) async {
+    if (!_versionCheck) return;
+    final version = _versionOf(await call('version', const [])) ?? '';
+    _version = version;
+    // The session about to be replayed may hold sets.
+    _adaptCodec();
+    if (isSupportedServerVersion(version)) return;
+    final error = UnsupportedVersionError(
+        version, minimumServerVersion, maximumServerVersion);
+    for (final registration in List.of(_liveByUuid.values)) {
+      registration.query.emitError(error, StackTrace.current);
+    }
+    await close();
+    throw error;
   }
 
   // ---------------------------------------------------------------------------
@@ -414,24 +450,6 @@ class Surreal {
   /// Starts every registered live query again after a reconnect. Each query
   /// is restarted on its own: one that fails keeps its registration, receives
   /// the error on its stream, and is tried again on the next reconnect.
-  /// Runs after the WebSocket engine reconnects. The server behind the URL
-  /// may have changed, so its version is checked again before live queries
-  /// are restarted. An unsupported server closes the client.
-  Future<void> _onReconnect() async {
-    if (_versionCheck) {
-      try {
-        await _checkVersion();
-      } on UnsupportedVersionError catch (error, stackTrace) {
-        for (final registration in List.of(_liveByUuid.values)) {
-          registration.query.emitError(error, stackTrace);
-        }
-        await close();
-        return;
-      }
-    }
-    await _restartLiveQueries();
-  }
-
   Future<void> _restartLiveQueries() async {
     for (final entry in _liveByUuid.entries.toList()) {
       final oldId = entry.key;

@@ -101,4 +101,23 @@ void main() {
     expect(lets['kept'], {'n': 1});
     expect(lets['id'], Uuid.fromBytes(Uint8List.fromList(List.filled(16, 1))));
   });
+
+  test('a variable with an exclusive integer bound replays as exclusive',
+      () async {
+    await db.set(
+        'r', const Range(begin: BoundIncluded(1), end: BoundExcluded(5)));
+    server.requests.clear();
+
+    await server.dropAll();
+    await eventually(
+        () => db.status == ConnectionStatus.connected && server.accepted == 2);
+
+    final let = server.requests.singleWhere((r) => r.method == 'let');
+    expect(
+        let.params[1],
+        isA<Range>()
+            .having((r) => r.begin, 'begin', isA<BoundIncluded>())
+            .having((r) => r.end, 'end', isA<BoundExcluded>())
+            .having((r) => r.end?.value, 'end value', 5));
+  });
 }
