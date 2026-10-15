@@ -460,6 +460,39 @@ void main() {
       expect(last('cancel').params, [txnId]);
     });
 
+    test('a reset refused as its session closes does not end a transaction',
+        () async {
+      final session = await db.newSession();
+      final held = <String, FakeRequest>{};
+      server.handler = (r) {
+        if (r.method == 'begin' || r.method == 'detach') {
+          held[r.method] = r;
+          return const FakeSilence();
+        }
+        return FakeSurrealServer.defaultReply(r);
+      };
+      final beginning = session.beginTransaction();
+      await eventually(() => held.containsKey('begin'));
+      final closing = session.close();
+      await eventually(() => held.containsKey('detach'));
+      await expectLater(session.reset(), throwsA(isA<InvalidSessionError>()));
+      reply(held['detach']!, error: {
+        'code': -32000,
+        'message': 'There was a problem with the datastore',
+        'kind': 'Internal',
+      });
+      await expectLater(closing, throwsA(isA<ServerError>()));
+      reply(held['begin']!, result: txnId);
+      expect((await beginning).id, txnId);
+      expect(server.methods, isNot(contains('cancel')));
+    });
+
+    test('the variables are a copy', () async {
+      await db.set('x', [1]);
+      (db.variables['x']! as List).add(2);
+      expect(db.variables['x'], [1]);
+    });
+
     test('a live query started as a reset runs is killed', () async {
       final queryId = Uuid('0192e3c4-0000-7000-8000-0000000000bb');
       FakeRequest? held;
