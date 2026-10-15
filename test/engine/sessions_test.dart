@@ -117,6 +117,37 @@ void main() {
       expect(server.methods, isNot(contains('attach')));
     });
 
+    test('a closed session cannot be forked or watch a live query', () async {
+      final session = await db.newSession();
+      await session.close();
+      expect(() => session.forkSession(), throwsA(isA<InvalidSessionError>()));
+      expect(
+          () => session.liveOf(Uuid.v4()), throwsA(isA<InvalidSessionError>()));
+    });
+
+    test('an attached session renews its own tokens', () async {
+      var issued = 0;
+      server.handler = (r) => switch (r.method) {
+            'signin' || 'refresh' => FakeResult({
+                'access': fakeJwt(
+                    Duration(seconds: r.method == 'signin' ? 2 : 3600),
+                    id: '${++issued}'),
+                'refresh': 'refresh-$issued',
+              }),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      final session = await db.newSession();
+      await session.signin(const RootAuth(username: 'u', password: 'p'));
+
+      await eventually(() => server.methods.contains('refresh'),
+          timeout: const Duration(seconds: 3));
+      expect(last('refresh').raw['session'], session.id);
+      await eventually(() => session.tokens?.refresh == 'refresh-2');
+      // The default session has no tokens of its own to renew.
+      expect(db.tokens, isNull);
+      await session.close();
+    });
+
     test('closing the client closes its sessions', () async {
       final session = await db.newSession();
       await db.close();

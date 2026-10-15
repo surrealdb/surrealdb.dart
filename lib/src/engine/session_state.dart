@@ -1,4 +1,5 @@
 import '../value/value.dart';
+import 'rpc.dart';
 
 /// The state of one server-side session, as the client knows it: the
 /// selected namespace and database, the access token and the variables set
@@ -56,7 +57,8 @@ class SessionState {
         if (value is SurrealNone) {
           variables.remove(key);
         } else {
-          variables[key] = value;
+          // A copy, so the value replayed later is the value that was sent.
+          variables[key] = snapshotValue(value);
         }
       case 'unset':
         variables.remove(params[0] as String);
