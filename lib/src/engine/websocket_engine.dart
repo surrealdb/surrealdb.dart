@@ -186,7 +186,7 @@ class WebSocketEngine implements Engine {
         final key = params[0] as String;
         // `let` without a value removes the variable, as on the server.
         if (params.length > 1) {
-          _variables[key] = params[1];
+          _variables[key] = snapshotValue(params[1]);
         } else {
           _variables.remove(key);
         }
