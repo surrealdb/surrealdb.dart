@@ -498,7 +498,8 @@ class Surreal {
         if (data != null) data,
       ]);
 
-  /// Runs a built in or user defined function and returns its result.
+  /// Runs a built in or user defined function and returns its result. A
+  /// function that returns NONE gives [none], not null.
   Future<dynamic> run(String name, {String? version, List<Object?>? args}) =>
       _rpc('run', [name, version, args ?? const []]);
 
@@ -639,13 +640,14 @@ class Surreal {
   }
 
   /// Sends an RPC call. A result of NONE, which methods that return nothing
-  /// give, comes back as null.
+  /// give, comes back as null, except from `run`, where it is the
+  /// function's own result.
   Future<Object?> _rpc(String method, [List<Object?> params = const []]) async {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
     final result = await engine.rpc(method, params);
     _session.apply(method, params, result);
-    return result is SurrealNone ? null : result;
+    return result is SurrealNone && method != 'run' ? null : result;
   }
 
   SurrealValue _thing(Object resource) {
