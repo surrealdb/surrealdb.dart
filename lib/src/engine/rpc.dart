@@ -88,8 +88,17 @@ class RpcProtocol {
     final queryId = _asUuid(result['id']);
     if (queryId == null) return null;
     final value = result['result'];
+    // The server sends the record id as `record`. In diff mode the result is
+    // a list of patches with no `id`, so `record` is the only place it is.
+    // Older servers only had it inside the result.
     RecordId? recordId;
-    if (value is Map && value['id'] is RecordId) {
+    final record = result['record'];
+    if (record is RecordId) {
+      recordId = record;
+    } else if (record is String) {
+      // The JSON format sends it as a string.
+      recordId = parseRecordId(record);
+    } else if (value is Map && value['id'] is RecordId) {
       recordId = value['id'] as RecordId;
     }
     return LiveMessage(
@@ -105,4 +114,260 @@ class RpcProtocol {
     if (value is String) return Uuid(value);
     return null;
   }
+}
+
+/// Parses a record id in the string form the server writes in JSON, such as
+/// `person:tobie`, `person:42`, `person:`a b``, `person:u'…'`,
+/// `person:[1, 'a']` or `person:{ a: 1 }`. Returns null when the string is
+/// not one this reader understands.
+RecordId? parseRecordId(String value) {
+  final reader = _SurqlReader(value);
+  final id = reader.recordId();
+  return reader.atEnd ? id : null;
+}
+
+/// Reads the SurrealQL values that can appear in a record id. Throws
+/// [FormatException] on anything else.
+class _SurqlReader {
+  _SurqlReader(this._text);
+
+  final String _text;
+  var _i = 0;
+
+  bool get atEnd {
+    _skipSpace();
+    return _i == _text.length;
+  }
+
+  RecordId? recordId() {
+    try {
+      final table = _ident();
+      _expect(':');
+      return RecordId(table, _id());
+    } on FormatException {
+      return null;
+    }
+  }
+
+  Object _id() {
+    final char = _peek();
+    if (char == '[' || char == '{') return _value()!;
+    if (char == 'u' && _isQuote(_peekAt(1))) return _value()!;
+    final number = _integer.matchAsPrefix(_text, _i);
+    if (number != null && !_isIdentChar(_peekAt(number.end - _i))) {
+      _i = number.end;
+      final digits = number.group(0)!;
+      return _wholeNumber(digits);
+    }
+    return _ident();
+  }
+
+  Object? _value() {
+    _skipSpace();
+    final char = _peek();
+    switch (char) {
+      case '[':
+        _i++;
+        final items = <Object?>[];
+        while (true) {
+          _skipSpace();
+          if (_peek() == ']') break;
+          items.add(_value());
+          _skipSpace();
+          if (_peek() != ',') break;
+          _i++;
+        }
+        _expect(']');
+        return items;
+      case '{':
+        _i++;
+        final map = <String, Object?>{};
+        while (true) {
+          _skipSpace();
+          if (_peek() == '}') break;
+          final key = _isQuote(_peek()) ? _string() : _ident();
+          _expect(':');
+          map[key] = _value();
+          _skipSpace();
+          if (_peek() != ',') break;
+          _i++;
+        }
+        _expect('}');
+        return map;
+      case "'":
+      case '"':
+        return _string();
+    }
+    if ((char == 'd' || char == 'u' || char == 'b') && _isQuote(_peekAt(1))) {
+      final start = _i;
+      _i++;
+      final text = _string();
+      return switch (char) {
+        'd' => SurrealDateTime.parse(text),
+        'u' => Uuid(text),
+        _ => _bytes(text, start),
+      };
+    }
+    final duration = _duration.matchAsPrefix(_text, _i);
+    if (duration != null) {
+      _i = duration.end;
+      return SurrealDuration.parse(duration.group(0)!);
+    }
+    final number = _number.matchAsPrefix(_text, _i);
+    if (number != null) {
+      _i = number.end;
+      final digits = number.group(1)!;
+      return switch (number.group(2)) {
+        'dec' => Decimal(digits),
+        'f' => double.parse(digits),
+        _ when digits.contains(RegExp('[.eE]')) => double.parse(digits),
+        _ => _wholeNumber(digits),
+      };
+    }
+    final start = _i;
+    final word = _ident();
+    switch (word) {
+      case 'true':
+        return true;
+      case 'false':
+        return false;
+      case 'NULL':
+        return null;
+      case 'NONE':
+        return null;
+    }
+    // A record id, such as `other:x`.
+    _i = start;
+    final nested = recordId();
+    if (nested == null) throw FormatException('Unexpected value', _text, start);
+    return nested;
+  }
+
+  String _string() {
+    final quote = _peek();
+    _i++;
+    final buffer = StringBuffer();
+    while (_i < _text.length) {
+      final char = _text[_i];
+      if (char == r'\' && _i + 1 < _text.length) {
+        _i++;
+        buffer.write(_escape());
+      } else if (char == quote) {
+        _i++;
+        return buffer.toString();
+      } else {
+        buffer.write(char);
+        _i++;
+      }
+    }
+    throw FormatException('Unterminated string', _text, _i);
+  }
+
+  /// An integer as an [int] when it is one exactly on this platform, which
+  /// on the web means within 53 bits, and as a [BigInt] otherwise.
+  static Object _wholeNumber(String digits) {
+    final value = BigInt.parse(digits);
+    return value.isValidInt ? value.toInt() : value;
+  }
+
+  /// The bytes written in hexadecimal as [text], as in `b"7879"`.
+  Uint8List _bytes(String text, int start) {
+    if (text.length.isOdd) throw FormatException('Invalid bytes', _text, start);
+    return Uint8List.fromList([
+      for (var i = 0; i < text.length; i += 2)
+        int.tryParse(text.substring(i, i + 2), radix: 16) ??
+            (throw FormatException('Invalid bytes', _text, start)),
+    ]);
+  }
+
+  /// Reads the character after a backslash in a string, and any digits of a
+  /// unicode escape, and returns what it stands for.
+  String _escape() {
+    final char = _text[_i++];
+    switch (char) {
+      case 'n':
+        return '\n';
+      case 'r':
+        return '\r';
+      case 't':
+        return '\t';
+      case 'b':
+        return '\b';
+      case 'f':
+        return '\f';
+      case '0':
+        return '\x00';
+      case 'u':
+        final braced = _peek() == '{';
+        final end = braced ? _text.indexOf('}', _i) : _i + 4;
+        final digits = _text.substring(braced ? _i + 1 : _i, end);
+        final code = int.tryParse(digits, radix: 16);
+        if (end < 0 || code == null) {
+          throw FormatException('Invalid unicode escape', _text, _i);
+        }
+        _i = braced ? end + 1 : end;
+        return String.fromCharCode(code);
+      default:
+        return char;
+    }
+  }
+
+  /// An identifier: plain, or escaped with backticks or angle brackets.
+  String _ident() {
+    _skipSpace();
+    final open = _peek();
+    if (open == '`' || open == '⟨') {
+      final close = open == '`' ? '`' : '⟩';
+      final buffer = StringBuffer();
+      _i++;
+      while (_i < _text.length) {
+        final char = _text[_i];
+        if (char == r'\' && _i + 1 < _text.length) {
+          _i++;
+          buffer.write(_escape());
+        } else if (char == close) {
+          _i++;
+          return buffer.toString();
+        } else {
+          buffer.write(char);
+          _i++;
+        }
+      }
+      throw FormatException('Unterminated identifier', _text, _i);
+    }
+    final start = _i;
+    while (_i < _text.length && _isIdentChar(_text[_i])) {
+      _i++;
+    }
+    if (_i == start) throw FormatException('Expected a name', _text, _i);
+    return _text.substring(start, _i);
+  }
+
+  void _expect(String char) {
+    _skipSpace();
+    if (_peek() != char) throw FormatException('Expected $char', _text, _i);
+    _i++;
+  }
+
+  void _skipSpace() {
+    while (_i < _text.length && _text[_i] == ' ') {
+      _i++;
+    }
+  }
+
+  String? _peek() => _peekAt(0);
+
+  String? _peekAt(int offset) =>
+      _i + offset < _text.length ? _text[_i + offset] : null;
+
+  static bool _isQuote(String? char) => char == "'" || char == '"';
+
+  static bool _isIdentChar(String? char) =>
+      char != null && _identChar.hasMatch(char);
+
+  static final _identChar = RegExp('[A-Za-z0-9_]');
+  static final _integer = RegExp(r'-?\d+');
+  static final _number = RegExp(r'(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(dec|f)?');
+  static final _duration =
+      RegExp(r'(?:\d+(?:ns|µs|us|ms|s|m|h|d|w|y))+(?![A-Za-z0-9_])');
 }
