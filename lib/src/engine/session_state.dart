@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../errors.dart';
 import '../value/value.dart';
 
@@ -76,7 +78,9 @@ class SessionState {
       case 'signin':
       case 'signup':
       case 'refresh':
-        setTokens(accessTokenOf(result), refreshTokenOf(result));
+        final access = accessTokenOf(result);
+        setTokens(access, refreshTokenOf(result));
+        _selectScopeOf(access);
       case 'authenticate':
         final access = params.isNotEmpty ? params[0] as String? : null;
         // A refresh token given with the access token arrives with it.
@@ -88,6 +92,7 @@ class SessionState {
                 ? _refreshToken
                 : null;
         setTokens(access, refresh);
+        _selectScopeOf(access);
       case 'invalidate':
         setTokens(null, null);
       case 'let':
@@ -106,6 +111,36 @@ class SessionState {
         variables.remove(params[0] as String);
       case 'reset':
         clear();
+    }
+  }
+
+  /// Records the namespace and database the server selects as it
+  /// authenticates [token]: those its claims name, when it is a JWT.
+  void _selectScopeOf(String? token) {
+    final claims = token == null ? null : _claimsOf(token);
+    if (claims == null) return;
+    final ns = claims['NS'];
+    final db = claims['DB'];
+    if (ns is String) {
+      namespace = ns;
+      namespaceCleared = false;
+    }
+    if (db is String) {
+      database = db;
+      databaseCleared = false;
+    }
+  }
+
+  /// The claims of a JWT, read without verifying it.
+  static Map<Object?, Object?>? _claimsOf(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    try {
+      final claims = jsonDecode(
+          utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))));
+      return claims is Map ? claims : null;
+    } catch (_) {
+      return null;
     }
   }
 

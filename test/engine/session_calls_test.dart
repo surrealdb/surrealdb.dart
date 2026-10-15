@@ -1,10 +1,19 @@
 @TestOn('vm')
 library;
 
+import 'dart:convert';
+
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
 import '../support/fake_server.dart';
+
+/// An unsigned JWT with [claims], as the server's tokens carry them.
+String jwt(Map<String, Object?> claims) {
+  String part(Object value) =>
+      base64Url.encode(utf8.encode(jsonEncode(value))).replaceAll('=', '');
+  return '${part({'alg': 'none'})}.${part(claims)}.';
+}
 
 void main() {
   late FakeSurrealServer server;
@@ -89,6 +98,43 @@ void main() {
           db.status == ConnectionStatus.connected && server.accepted == 2);
       expect(server.methods, ['authenticate', 'use']);
       expect(lastParams('use'), [none, null]);
+    });
+
+    test('signing in selects what the token names', () async {
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(jwt({'NS': 'ns', 'DB': 'db', 'ID': 'u'}))
+          : FakeSurrealServer.defaultReply(r);
+      await db.use(namespace: 'other', database: 'x');
+      await db.use(namespace: null);
+      await db.signin(const DatabaseAuth(
+          namespace: 'ns', database: 'db', username: 'u', password: 'p'));
+      expect([db.namespace, db.database], ['ns', 'db']);
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(server.methods, ['use', 'authenticate']);
+      expect(lastParams('use'), ['ns', 'db']);
+    });
+
+    test('authenticating selects what the token names', () async {
+      await db.use(namespace: 'a', database: 'b');
+      await db.authenticate(jwt({'NS': 'ns', 'ID': 'u'}));
+      expect([db.namespace, db.database], ['ns', 'b']);
+    });
+
+    test('a selection made after authenticating wins on a reconnect', () async {
+      await db.authenticate(jwt({'NS': 'ns', 'ID': 'u'}));
+      await db.use(namespace: 'other', database: 'db');
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(server.methods, ['use', 'authenticate', 'use']);
+      expect(lastParams('use'), ['other', 'db']);
+      expect([db.namespace, db.database], ['other', 'db']);
     });
 
     test('a new connection starts with nothing known, not cleared', () async {
