@@ -22,11 +22,12 @@ final class SurrealApi {
   final Map<String, String> _headers;
 
   /// A copy that sends [name] with every call, or no longer sends it when
-  /// [value] is null.
+  /// [value] is null. Header names are not case sensitive, and are sent in
+  /// lower case.
   SurrealApi header(String name, String? value) => SurrealApi._(_target, {
         for (final entry in _headers.entries)
-          if (entry.key != name) entry.key: entry.value,
-        if (value != null) name: value,
+          if (entry.key != name.toLowerCase()) entry.key: entry.value,
+        if (value != null) name.toLowerCase(): value,
       });
 
   /// Calls [path] with the HTTP [method], such as `get` or `post`.
@@ -43,7 +44,12 @@ final class SurrealApi {
         'path': path,
         'request': {
           'method': method.toLowerCase(),
-          'headers': {..._headers, ...?headers},
+          'headers': {
+            ..._headers,
+            // These replace the ones set with [header], whatever their case.
+            for (final MapEntry(:key, :value) in (headers ?? const {}).entries)
+              key.toLowerCase(): value,
+          },
           if (query != null) 'query': query,
           // An explicit null is sent as NULL; a body left out arrives as NONE.
           if (body is! _NoBody) 'body': body,
