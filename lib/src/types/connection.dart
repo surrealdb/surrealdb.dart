@@ -63,6 +63,9 @@ class ConnectOptions {
     this.database,
     this.authentication,
     this.token,
+    this.refreshToken,
+    this.renewTokens = true,
+    this.tokenExpiryMargin = const Duration(seconds: 60),
     this.reconnect = const ReconnectOptions(),
     this.versionCheck = true,
     this.timeout = const Duration(seconds: 30),
@@ -82,6 +85,19 @@ class ConnectOptions {
 
   /// An existing token to authenticate with once connected.
   final String? token;
+
+  /// The refresh token issued with [token], used to refresh the session when
+  /// [token] has expired and before it expires.
+  final String? refreshToken;
+
+  /// Whether to renew the session's access token before it expires: with
+  /// its refresh token when there is one, otherwise by signing in again with
+  /// [authentication]. Tokens without an expiry are never renewed.
+  final bool renewTokens;
+
+  /// How long before the access token expires to renew it. When the token
+  /// lives for less than twice this, it is renewed halfway through instead.
+  final Duration tokenExpiryMargin;
 
   /// How to behave when the connection drops.
   final ReconnectOptions reconnect;

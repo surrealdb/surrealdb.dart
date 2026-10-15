@@ -21,7 +21,9 @@ class HttpEngine implements Engine {
     SurrealCodec codec, {
     http.Client? client,
     Duration? requestTimeout = const Duration(seconds: 30),
-  })  : _codec = codec,
+    SessionState? session,
+  })  : _session = session ?? SessionState(),
+        _codec = codec,
         _protocol = RpcProtocol(codec),
         _client = client ?? http.Client(),
         _requestTimeout = requestTimeout;
@@ -39,7 +41,7 @@ class HttpEngine implements Engine {
   /// The session state sent with every request: the namespace and database
   /// as headers, the token as a bearer token and the variables merged into
   /// each query.
-  final SessionState _session = SessionState();
+  final SessionState _session;
 
   /// The namespace currently selected for outgoing requests.
   String? get namespace => _session.namespace;

@@ -10,8 +10,26 @@ import '../value/value.dart';
 class SessionState {
   String? namespace;
   String? database;
-  String? token;
+  String? _token;
+  String? _refreshToken;
   final Map<String, Object?> variables = {};
+
+  /// Called whenever the access or refresh token changes.
+  void Function()? onTokensChanged;
+
+  /// The access token the session is authenticated with.
+  String? get token => _token;
+
+  /// The refresh token issued with [token], if any.
+  String? get refreshToken => _refreshToken;
+
+  /// Replaces both tokens at once.
+  void setTokens(String? access, String? refresh) {
+    if (access == _token && refresh == _refreshToken) return;
+    _token = access;
+    _refreshToken = refresh;
+    onTokensChanged?.call();
+  }
 
   /// Applies the effect of a successful [method] call with [params] that
   /// returned [result].
@@ -21,13 +39,15 @@ class SessionState {
         applyUse(params, result);
       case 'signin':
       case 'signup':
-        token = accessTokenOf(result);
-      case 'authenticate':
-        token = params.isNotEmpty ? params[0] as String? : null;
       case 'refresh':
-        token = accessTokenOf(result);
+        setTokens(accessTokenOf(result), refreshTokenOf(result));
+      case 'authenticate':
+        final access = params.isNotEmpty ? params[0] as String? : null;
+        // Re-authenticating with the same token, as a reconnect does, keeps
+        // its refresh token.
+        setTokens(access, access == _token ? _refreshToken : null);
       case 'invalidate':
-        token = null;
+        setTokens(null, null);
       case 'let':
         final key = params[0] as String;
         // `let` without a value, or with NONE, removes the variable, as on
@@ -73,7 +93,7 @@ class SessionState {
   void clear() {
     namespace = null;
     database = null;
-    token = null;
+    setTokens(null, null);
     variables.clear();
   }
 
@@ -81,8 +101,15 @@ class SessionState {
   SessionState copy() => SessionState()
     ..namespace = namespace
     ..database = database
-    ..token = token
+    .._token = _token
+    .._refreshToken = _refreshToken
     ..variables.addAll(variables);
+
+  /// The refresh token in a `signin`, `signup` or `refresh` result, if any.
+  static String? refreshTokenOf(Object? result) {
+    final refresh = result is Map ? result['refresh'] : null;
+    return refresh is String ? refresh : null;
+  }
 
   /// The access token in a `signin`, `signup` or `refresh` result: a bare
   /// string, `{access, refresh}` from 3.x, or `{token}` from older servers.

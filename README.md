@@ -170,6 +170,24 @@ await db.signin(const AccessRecordAuth(
 ));
 ```
 
+When the access method is defined `WITH REFRESH`, `signin` and `signup` also
+return a refresh token. The client keeps both, renews the access token
+shortly before it expires (`ConnectOptions.renewTokens` and
+`tokenExpiryMargin`), and uses the refresh token when a reconnect finds the
+access token expired. Without a refresh token, the client renews by signing in
+again with `ConnectOptions.authentication`, when that was given.
+
+```dart
+final tokens = await db.signin(credentials);
+db.authChanges.listen((tokens) => saveTokens(tokens));
+
+// Later, or in a new process:
+await db.authenticate(tokens.access, refreshToken: tokens.refresh);
+
+final renewed = await db.refresh(); // new access and refresh tokens
+await db.revoke();                  // the refresh token can no longer be used
+```
+
 ### Data types
 
 ```dart

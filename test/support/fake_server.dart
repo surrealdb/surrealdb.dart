@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:surrealdb/surrealdb.dart';
@@ -161,4 +162,13 @@ Future<void> eventually(bool Function() condition,
     }
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
+}
+
+/// A JWT whose payload expires [expiresIn] from now. The signature is not
+/// valid; only the client reads it.
+String fakeJwt(Duration expiresIn, {String id = 'a'}) {
+  String encode(Map<String, Object?> json) =>
+      base64Url.encode(utf8.encode(jsonEncode(json))).replaceAll('=', '');
+  final exp = DateTime.now().add(expiresIn).millisecondsSinceEpoch ~/ 1000;
+  return '${encode({'alg': 'HS512'})}.${encode({'exp': exp, 'jti': id})}.sig';
 }
