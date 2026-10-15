@@ -27,22 +27,55 @@ mixin SurrealQueryable {
   Future<List<Object?>> query(String query,
       {Map<String, Object?>? bindings}) async {
     final statements = await queryRaw(query, bindings: bindings);
-    final results = <Object?>[];
-    for (final (index, statement) in statements.indexed) {
-      if (statement['status'] != 'OK') {
-        throw ServerError.fromStatement(statement, index: index);
-      }
-      results.add(statement['result']);
-    }
-    return results;
+    return _results(statements);
   }
 
   /// Runs a SurrealQL query and returns the raw status objects for each
   /// statement, without throwing on a failed statement. Each entry has a
   /// `status`, `time`, and `result`.
   Future<List<Map<String, dynamic>>> queryRaw(String query,
+          {Map<String, Object?>? bindings}) =>
+      _statements('query', query, bindings);
+
+  /// Runs an ISO GQL (ISO/IEC 39075) graph query, such as
+  /// `MATCH (p:person)-[:knows]->(f:person) RETURN f.name`, and returns the
+  /// result of each statement in order, as [query] does for SurrealQL. Needs
+  /// SurrealDB 3.2 or later.
+  ///
+  /// This is not GraphQL: for that, see [graphql].
+  Future<List<Object?>> gql(String query,
       {Map<String, Object?>? bindings}) async {
-    final result = await _call('query', [query, bindings ?? const {}]);
+    final statements = await gqlRaw(query, bindings: bindings);
+    return _results(statements);
+  }
+
+  /// Runs an ISO GQL graph query and returns the raw status objects for each
+  /// statement, as [queryRaw] does.
+  Future<List<Map<String, dynamic>>> gqlRaw(String query,
+          {Map<String, Object?>? bindings}) =>
+      _statements('gql', query, bindings);
+
+  /// Runs a GraphQL request and returns the GraphQL response, a map with
+  /// `data` and, when something failed, `errors`. The database must have
+  /// GraphQL enabled with `DEFINE CONFIG GRAPHQL`. Needs SurrealDB 3.2 or
+  /// later, and cannot run inside a transaction.
+  Future<Map<String, dynamic>> graphql(String query,
+      {Map<String, Object?>? variables, String? operationName}) async {
+    final result = await _call('graphql', [
+      query,
+      if (variables != null || operationName != null) variables ?? const {},
+      if (operationName != null) operationName,
+    ]);
+    return (result as Map).cast<String, dynamic>();
+  }
+
+  /// Calls the APIs defined on the database with `DEFINE API`. See
+  /// [SurrealApi].
+  SurrealApi get api => SurrealApi._(this, const {});
+
+  Future<List<Map<String, dynamic>>> _statements(
+      String method, String query, Map<String, Object?>? bindings) async {
+    final result = await _call(method, [query, bindings ?? const {}]);
     return (result as List).cast<Map<String, dynamic>>();
   }
 
@@ -232,4 +265,16 @@ QueryFrame? _frameFrom(Object? raw) {
     default:
       return null;
   }
+}
+
+/// The result of each statement, failing with the first statement's error.
+List<Object?> _results(List<Map<String, dynamic>> statements) {
+  final results = <Object?>[];
+  for (final (index, statement) in statements.indexed) {
+    if (statement['status'] != 'OK') {
+      throw ServerError.fromStatement(statement, index: index);
+    }
+    results.add(statement['result']);
+  }
+  return results;
 }

@@ -17,7 +17,8 @@ web, and desktop), since it depends only on portable packages.
 - The full RPC surface: `use`, `signin`, `signup`, `authenticate`, `invalidate`,
   `reset`, `info`, `set`, `unset`, `query`, `select`, `create`, `insert`,
   `insertRelation`, `update`, `upsert`, `merge`, `patch`, `delete`, `relate`,
-  `run`, `live`, `liveOf`, `kill`, `import`, `export`, `version`, and `health`.
+  `run`, `live`, `liveOf`, `kill`, `gql`, `graphql`, `api`, `queryStream`,
+  `import`, `export`, `version`, and `health`.
 - Session state (namespace, database, variables and authentication) that is
   replayed after a WebSocket reconnect, and kept by the client over HTTP.
 - Native data types: `RecordId`, `StringRecordId`, `Table`, `Range`, `Uuid`,
@@ -143,6 +144,24 @@ Results are streamed over WebSocket from SurrealDB 3.3. Over HTTP, or against
 an older server, the query runs as with `query` and the same frames are given
 when it completes. `query` itself never streams, so inside a transaction a
 query only streams when you ask for it with `queryStream`.
+
+### Graph queries, GraphQL and custom APIs
+
+```dart
+// ISO GQL graph queries (SurrealDB 3.2+).
+final [friends] = await db.gql(
+  r'MATCH (p:person)-[:knows]->(f:person) WHERE p.name = $name RETURN f.name',
+  bindings: {'name': 'Ann'},
+);
+
+// GraphQL, once enabled with DEFINE CONFIG GRAPHQL (SurrealDB 3.2+).
+final response = await db.graphql(r'query Q($id: ID!) { person(id: $id) { name } }',
+    variables: {'id': 'tobie'});
+
+// APIs defined with DEFINE API.
+final result = await db.api.header('x-tenant', 'acme').get('/users/tobie');
+print(result.value()); // the body, or an UnsuccessfulApiError
+```
 
 ### Sessions and transactions
 

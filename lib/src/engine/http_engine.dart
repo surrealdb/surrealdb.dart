@@ -134,6 +134,7 @@ class HttpEngine implements Engine {
       case 'kill':
         throw UnsupportedFeatureError(method);
       case 'query':
+      case 'gql':
         // Variables set with `let` apply to every query, under any bound in
         // the call itself.
         if (_session.variables.isNotEmpty) {
