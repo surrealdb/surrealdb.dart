@@ -188,11 +188,12 @@ final txn = await db.beginTransaction();
 try {
   await txn.merge(const RecordId('account', 'a'), {'balance': 90});
   await txn.merge(const RecordId('account', 'b'), {'balance': 110});
-  await txn.commit();
 } catch (_) {
   await txn.cancel();
   rethrow;
 }
+// Outside the try: a commit that fails has already ended the transaction.
+await txn.commit();
 ```
 
 Both need SurrealDB 3.0 or later. They are not available over HTTP, where

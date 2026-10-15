@@ -62,15 +62,33 @@ void main() {
       await db.connect(wsUrl,
           options: const ConnectOptions(format: SurrealFormat.json));
       // Signing in as a namespace user selects the namespace on the server,
-      // without the client knowing.
+      // which the client reads from the token.
       await db.signin(const NamespaceAuth(
           namespace: 'test', username: 'ns_user', password: 'pass'));
-      expect(db.namespace, isNull);
+      expect(db.namespace, 'test');
       await db.use(database: 'other');
       final [ns, database] =
           await db.query('RETURN session::ns(); RETURN session::db();');
       expect(ns, 'test');
       expect(database, 'other');
+    });
+
+    test('signing in after clearing tracks what the server selects', () async {
+      final root = await connectRoot(wsUrl);
+      await root.query('DEFINE USER IF NOT EXISTS ns_user ON NAMESPACE '
+          "PASSWORD 'pass' ROLES OWNER;");
+      await root.close();
+
+      final db = await connectRoot(wsUrl);
+      addTearDown(db.close);
+      await db.use(namespace: null);
+      await db.signin(const NamespaceAuth(
+          namespace: 'test', username: 'ns_user', password: 'pass'));
+      final [ns, database] =
+          await db.query('RETURN session::ns(); RETURN session::db();');
+      expect([db.namespace, db.database], [ns, null]);
+      expect(ns, 'test');
+      expect(database, anyOf(isNull, same(none)));
     });
 
     test('liveOf returns the same handle for the same query', () async {

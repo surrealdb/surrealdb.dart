@@ -332,8 +332,8 @@ class _SurqlReader {
       while (_i < _text.length) {
         final char = _text[_i];
         if (char == r'\' && _i + 1 < _text.length) {
-          buffer.write(_text[_i + 1]);
-          _i += 2;
+          _i++;
+          buffer.write(_escape());
         } else if (char == close) {
           _i++;
           return buffer.toString();

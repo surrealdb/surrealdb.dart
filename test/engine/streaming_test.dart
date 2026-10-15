@@ -211,6 +211,30 @@ void main() {
     await eventually(() => server.accepted == 2);
   });
 
+  test('a cancel that fails after the stream ended keeps the socket', () async {
+    await connect('surrealdb-3.3.4');
+    FakeRequest? stream;
+    server.handler = (r) {
+      switch (r.method) {
+        case 'query_stream':
+          stream = r;
+          return FakeResults(frames.sublist(0, 2));
+        case 'query_cancel':
+          // The query finished just before the cancel reached the server.
+          server.push({'id': stream!.id, 'result': frames.last});
+          return const FakeError(
+              'No streaming query with this request id is in progress',
+              code: -32000);
+        default:
+          return FakeSurrealServer.defaultReply(r);
+      }
+    };
+    await db.queryStream('q').first;
+    await eventually(() => server.methods.contains('query_cancel'));
+    expect((await db.query('RETURN 1')), isNotNull);
+    expect(server.accepted, 1);
+  });
+
   test('commit waits for a buffered transaction query too', () async {
     final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
     await connect('surrealdb-3.2.0');

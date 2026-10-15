@@ -487,6 +487,50 @@ void main() {
           timeout: const Duration(seconds: 8));
     }, timeout: const Timeout(Duration(seconds: 20)));
 
+    test('signing in again keeps what was selected since', () async {
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fakeJwt(const Duration(seconds: 1),
+              id: '${issued++}', claims: {'NS': 'ns', 'DB': 'db'}))
+          : FakeSurrealServer.defaultReply(r);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: DatabaseAuth(
+                namespace: 'ns', database: 'db', username: 'u', password: 'p'),
+          ));
+      expect([db.namespace, db.database], ['ns', 'db']);
+      await db.use(database: 'other');
+      await eventually(
+          () => server.methods.where((m) => m == 'signin').length >= 2,
+          timeout: const Duration(seconds: 3));
+      await eventually(() => server.methods.last == 'use');
+      expect(server.requests.last.params, ['ns', 'other']);
+      expect([db.namespace, db.database], ['ns', 'other']);
+    });
+
+    test('signing in again uses the credentials as they were given', () async {
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fakeJwt(const Duration(seconds: 1), id: '${issued++}'))
+          : FakeSurrealServer.defaultReply(r);
+      final variables = <String, Object?>{'email': 'a@example.com'};
+      await db.connect(server.url,
+          options: ConnectOptions(
+            versionCheck: false,
+            authentication: AccessRecordAuth(
+                access: 'user',
+                namespace: 'ns',
+                database: 'db',
+                variables: variables),
+          ));
+      variables['email'] = 'b@example.com';
+      await eventually(
+          () => server.methods.where((m) => m == 'signin').length >= 2,
+          timeout: const Duration(seconds: 3));
+      final signins = server.requests.where((r) => r.method == 'signin');
+      expect(signins.last.params, signins.first.params);
+      expect((signins.last.params.single as Map)['email'], 'a@example.com');
+    });
+
     test('a reconnect keeps the tokens until signing in again works', () async {
       server.handler = (r) => r.method == 'signin'
           ? FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}'))

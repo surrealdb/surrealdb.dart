@@ -14,8 +14,10 @@ final class _TokenRenewal {
   /// Told about a renewal that failed.
   final void Function(Object error, StackTrace stackTrace)? onError;
 
-  /// The credentials to sign in with again when there is no refresh token.
-  AnyAuth? credentials;
+  /// The credentials to sign in with again when there is no refresh token,
+  /// as sent. A copy, so that changes to the caller's objects since do not
+  /// change who signs in.
+  Map<String, Object?>? credentials;
 
   Timer? _timer;
 
@@ -107,6 +109,25 @@ final class _TokenRenewal {
     _timer = Timer(delay, () => _renew(token, expiry));
   }
 
+  /// Selects [namespace] and [database] again, as replay values, when
+  /// signing in again selected others: what the new token names.
+  Future<void> _selectAgain(Object? namespace, Object? database) async {
+    if (_state.replayNamespace == namespace &&
+        _state.replayDatabase == database) {
+      return;
+    }
+    final session =
+        _sessionId == null ? _client : _client._attached[_sessionId];
+    try {
+      await session?.use(
+        namespace: namespace is SurrealNone ? _unchanged : namespace as String?,
+        database: database is SurrealNone ? _unchanged : database as String?,
+      );
+    } on SurrealError {
+      // The session stays as signing in left it, which is what it reports.
+    }
+  }
+
   /// Schedules the next attempt at a renewal that did not happen, backing
   /// off.
   void _retry() {
@@ -125,6 +146,8 @@ final class _TokenRenewal {
     try {
       final credentials = this.credentials;
       final refreshToken = _state.refreshToken;
+      final namespace = _state.replayNamespace;
+      final database = _state.replayDatabase;
       if (refreshToken != null) {
         await _client._rpc(
             'refresh',
@@ -133,9 +156,9 @@ final class _TokenRenewal {
             ],
             session: _sessionId);
       } else if (credentials != null) {
-        await _client._rpc('signin', [credentials.toJson()],
-            session: _sessionId);
+        await _client._rpc('signin', [credentials], session: _sessionId);
       }
+      await _selectAgain(namespace, database);
       // A server may give the same token back, which renews nothing and
       // schedules nothing.
       if (_state.token == token && _timer == null) _retry();
