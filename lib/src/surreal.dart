@@ -335,8 +335,11 @@ class Surreal {
   /// Defines a session wide parameter that can be used in queries as `$key`.
   ///
   /// Over WebSocket the parameter lives in the server-side session and is
-  /// set again after a reconnect. Over HTTP, where each request is its own
-  /// session, the client keeps it and binds it to every query.
+  /// set again after a reconnect, so every call sees it. Over HTTP, where
+  /// each request is its own session, the client keeps it and binds it to
+  /// every [query]. The other calls, such as [select] and [create], take no
+  /// variables on the server, so over HTTP they run without it: use [query]
+  /// when they depend on it, for example through table permissions.
   Future<void> set(String key, Object? value) async {
     await _rpc('let', [key, value]);
   }
@@ -460,7 +463,11 @@ class Surreal {
   /// closes. Use [live] for a query that survives reconnects.
   LiveQuery liveOf(Uuid id) {
     final engine = _engine;
-    if (engine == null) throw const ConnectionUnavailableError();
+    // Without a connection there is no session for the query to run in, and
+    // nothing would ever arrive on, or close, its stream.
+    if (engine == null || engine.status != ConnectionStatus.connected) {
+      throw const ConnectionUnavailableError();
+    }
     if (!engine.supportsLiveQueries) {
       throw const UnsupportedFeatureError('live');
     }
