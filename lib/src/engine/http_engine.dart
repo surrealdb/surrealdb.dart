@@ -6,8 +6,10 @@ import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
+import 'session_state.dart';
 
 /// Carries RPC over HTTP by posting encoded messages to `/rpc`. The
 /// serialization is set by the [SurrealCodec] it is given.
@@ -40,24 +42,28 @@ class HttpEngine implements Engine {
   Uri? _url;
   ConnectionStatus _status = ConnectionStatus.disconnected;
 
-  String? _namespace;
-  String? _database;
-  String? _token;
+  /// The session state sent with every request: the namespace and database
+  /// as headers, the token as a bearer token and the variables merged into
+  /// each query.
+  final SessionState _session = SessionState();
 
   /// The namespace currently selected for outgoing requests.
-  String? get namespace => _namespace;
+  String? get namespace => _session.namespace;
 
   /// The database currently selected for outgoing requests.
-  String? get database => _database;
+  String? get database => _session.database;
 
   /// The bearer token sent with outgoing requests.
-  String? get token => _token;
+  String? get token => _session.token;
 
   @override
   ConnectionStatus get status => _status;
 
   @override
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
+
+  @override
+  bool get supportsLiveQueries => false;
 
   @override
   Stream<LiveMessage> get liveNotifications => const Stream.empty();
@@ -95,30 +101,46 @@ class HttpEngine implements Engine {
   @override
   Future<Object?> rpc(String method, List<Object?> params) async {
     switch (method) {
+      // Each HTTP request is its own server-side session, so session state is
+      // kept here and sent with every request instead.
       case 'use':
-        if (params.isNotEmpty && params[0] != null) {
-          _namespace = params[0] as String;
-        }
-        if (params.length > 1 && params[1] != null) {
-          _database = params[1] as String;
-        }
-        return null;
       case 'authenticate':
-        _token = params.isNotEmpty ? params[0] as String? : null;
-        return null;
       case 'invalidate':
-        _token = null;
-        return null;
       case 'let':
+        // Kept as it encodes now, so later changes to the caller's objects
+        // do not reach the value sent with each query. NONE removes the
+        // variable, so it is passed on as it is.
+        final keep = params.length > 1 && params[1] is! SurrealNone
+            ? (_codec.decode(_codec.encode(params)) as List).cast<Object?>()
+            : params;
+        _session.apply(method, keep, null);
+        return null;
       case 'unset':
+      case 'reset':
+        _session.apply(method, params, null);
+        return null;
       case 'live':
       case 'kill':
         throw UnsupportedFeatureError(method);
+      case 'query':
+        // Variables set with `let` apply to every query, under any bound in
+        // the call itself.
+        if (_session.variables.isNotEmpty) {
+          final bindings = params.length > 1 ? params[1] : null;
+          params = [
+            params[0],
+            {
+              ..._session.variables,
+              if (bindings is Map) ...bindings,
+            },
+            ...params.skip(2),
+          ];
+        }
     }
 
     final result = await _send(method, params);
-    if (method == 'signin' || method == 'signup') {
-      _token = _extractToken(result);
+    if (method == 'signin' || method == 'signup' || method == 'refresh') {
+      _session.apply(method, params, result);
     }
     return result;
   }
@@ -130,9 +152,9 @@ class HttpEngine implements Engine {
     final headers = <String, String>{
       'Content-Type': _codec.contentType,
       'Accept': _codec.contentType,
-      if (_token != null) 'Authorization': 'Bearer $_token',
-      if (_namespace != null) 'Surreal-NS': _namespace!,
-      if (_database != null) 'Surreal-DB': _database!,
+      if (_session.token != null) 'Authorization': 'Bearer ${_session.token}',
+      if (_session.namespace != null) 'Surreal-NS': _session.namespace!,
+      if (_session.database != null) 'Surreal-DB': _session.database!,
     };
     // Completing this aborts the request, so a timed out request does not
     // keep its connection open.
@@ -173,13 +195,5 @@ class HttpEngine implements Engine {
     } catch (_) {
       return null;
     }
-  }
-
-  String? _extractToken(Object? result) {
-    if (result is String) return result;
-    if (result is Map && result['token'] is String) {
-      return result['token'] as String;
-    }
-    return null;
   }
 }

@@ -3,12 +3,15 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../cbor/codec.dart';
 import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
+import 'session_state.dart';
 
 /// Carries RPC over a WebSocket. Supports live queries and automatic
 /// reconnection. The serialization is set by the [SurrealCodec] it is given,
@@ -43,11 +46,8 @@ class WebSocketEngine implements Engine {
   var _intentionalClose = false;
   var _reconnecting = false;
 
-  // Session state, replayed after a reconnect.
-  String? _namespace;
-  String? _database;
-  String? _token;
-  final Map<String, Object?> _variables = {};
+  /// The session state, replayed after a reconnect.
+  final SessionState _session = SessionState();
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
@@ -61,6 +61,9 @@ class WebSocketEngine implements Engine {
 
   @override
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
+
+  @override
+  bool get supportsLiveQueries => true;
 
   @override
   Stream<LiveMessage> get liveNotifications => _liveController.stream;
@@ -186,7 +189,7 @@ class WebSocketEngine implements Engine {
         throw RequestTimeoutError(method, timeout);
       });
     }
-    _trackSession(method, sent, result);
+    _session.apply(method, sent, result);
     return result;
   }
 
@@ -202,6 +205,7 @@ class WebSocketEngine implements Engine {
     'invalidate',
     'let',
     'unset',
+    'reset',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -212,43 +216,6 @@ class WebSocketEngine implements Engine {
     _onDisconnected(null);
     unawaited(subscription?.cancel());
     unawaited(_closeChannel(channel));
-  }
-
-  void _trackSession(String method, List<Object?> params, Object? result) {
-    switch (method) {
-      case 'use':
-        if (params.isNotEmpty && params[0] != null) {
-          _namespace = params[0] as String;
-        }
-        if (params.length > 1 && params[1] != null) {
-          _database = params[1] as String;
-        }
-      case 'signin':
-      case 'signup':
-        _token = _extractToken(result);
-      case 'authenticate':
-        if (params.isNotEmpty) _token = params[0] as String?;
-      case 'invalidate':
-        _token = null;
-      case 'let':
-        final key = params[0] as String;
-        // `let` without a value removes the variable, as on the server.
-        if (params.length > 1) {
-          _variables[key] = params[1];
-        } else {
-          _variables.remove(key);
-        }
-      case 'unset':
-        _variables.remove(params[0] as String);
-    }
-  }
-
-  String? _extractToken(Object? result) {
-    if (result is String) return result;
-    if (result is Map && result['token'] is String) {
-      return result['token'] as String;
-    }
-    return null;
   }
 
   void _onMessage(dynamic data) {
@@ -331,13 +298,19 @@ class WebSocketEngine implements Engine {
   }
 
   Future<void> _restoreSession() async {
-    if (_namespace != null || _database != null) {
-      await _call('use', [_namespace, _database]);
+    final session = _session;
+    final namespace = session.replayNamespace;
+    final database = session.replayDatabase;
+    // A selection only partly known is made after authenticating, which may
+    // select the rest.
+    final known = namespace is! SurrealNone && database is! SurrealNone;
+    if (known && (namespace != null || database != null)) {
+      await _call('use', [namespace, database]);
     }
-    for (final MapEntry(:key, :value) in _variables.entries) {
+    for (final MapEntry(:key, :value) in session.variables.entries) {
       await _call('let', [key, value]);
     }
-    final token = _token;
+    final token = session.token;
     if (token != null) {
       try {
         await _call('authenticate', [token]);
@@ -345,10 +318,40 @@ class WebSocketEngine implements Engine {
         // The server rejected the token, for example because it expired. The
         // connection itself is fine, so carry on without authentication
         // rather than failing every attempt.
-        _token = null;
+        session.token = null;
         _onAuthenticationLost?.call(error);
       }
     }
+    if (!known) {
+      if (namespace is! SurrealNone || database is! SurrealNone) {
+        await _useKeeping(namespace, database);
+      }
+    } else if (token != null &&
+        (namespace == null ||
+            database == null ||
+            session.replayNamespace != namespace ||
+            session.replayDatabase != database)) {
+      // Cleared, or changed by authenticating, which selects what the
+      // token names.
+      await _call('use', [namespace, database]);
+    }
+  }
+
+  /// Selects [namespace] and [database], keeping the session's own for one
+  /// that is NONE.
+  Future<void> _useKeeping(Object? namespace, Object? database) async {
+    if (codec is! CborCodec) {
+      // NONE would arrive as null and clear it, so send what is selected.
+      final result = await _call('query', [
+        'RETURN [session::ns(), session::db()]',
+        const <String, Object?>{},
+      ]);
+      final [current] = result! as List<Object?>;
+      final [ns, db] = (current! as Map)['result'] as List<Object?>;
+      if (namespace is SurrealNone) namespace = ns;
+      if (database is SurrealNone) database = db;
+    }
+    await _call('use', [namespace, database]);
   }
 
   void _failPending(Object error) {

@@ -27,6 +27,9 @@ abstract class Engine {
   /// Emits whenever the connection status changes.
   Stream<ConnectionStatus> get statusChanges;
 
+  /// Whether this engine can run live queries.
+  bool get supportsLiveQueries;
+
   /// Emits live query notifications. Engines that do not support live queries
   /// never emit on this stream.
   Stream<LiveMessage> get liveNotifications;

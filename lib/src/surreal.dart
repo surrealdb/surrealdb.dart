@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
+import 'engine/session_state.dart';
 import 'engine/websocket_engine.dart';
 import 'errors.dart';
 import 'live_query.dart';
@@ -26,9 +27,16 @@ class _LiveRegistration {
   _LiveRegistration(this.query, this.resource, this.diff);
 
   final LiveQuery query;
-  final Object resource;
+
+  /// What the live query selects from, or null for a query attached with
+  /// `liveOf`, which the client cannot restart.
+  final Object? resource;
   final bool diff;
 }
+
+/// The default for the arguments of [Surreal.use] that leaves the current
+/// value as it is. Passing null instead clears the value.
+const String _unchanged = '\u0000unchanged';
 
 /// A client for a single SurrealDB connection.
 ///
@@ -52,9 +60,7 @@ class Surreal {
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   ConnectionStatus? _publishedStatus;
 
-  String? _namespace;
-  String? _database;
-  String? _accessToken;
+  final SessionState _session = SessionState();
   String? _version;
   var _versionCheck = true;
 
@@ -66,13 +72,13 @@ class Surreal {
   StreamSubscription<LiveMessage>? _liveSubscription;
 
   /// The namespace currently selected, if any.
-  String? get namespace => _namespace;
+  String? get namespace => _session.namespace;
 
   /// The database currently selected, if any.
-  String? get database => _database;
+  String? get database => _session.database;
 
   /// The access token in use, if the session is authenticated.
-  String? get accessToken => _accessToken;
+  String? get accessToken => _session.token;
 
   /// The server version, available after [connect] with a version check or a
   /// call to [version].
@@ -118,7 +124,7 @@ class Surreal {
     _versionCheck = options.versionCheck;
     engine.onVerify = _verifyServer;
     engine.onReconnect = _restartLiveQueries;
-    engine.onAuthenticationLost = (_) => _accessToken = null;
+    engine.onAuthenticationLost = (_) => _session.token = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
@@ -138,7 +144,10 @@ class Surreal {
     _verifying = false;
     _publishStatus(engine.status);
     if (options.namespace != null || options.database != null) {
-      await use(namespace: options.namespace, database: options.database);
+      await use(
+        namespace: options.namespace ?? _unchanged,
+        database: options.database ?? _unchanged,
+      );
     }
     if (options.authentication != null) {
       await signin(options.authentication!);
@@ -191,9 +200,7 @@ class Surreal {
       if (engine != null) _publishStatus(ConnectionStatus.disconnected);
       _httpClient?.close();
       _httpClient = null;
-      _namespace = null;
-      _database = null;
-      _accessToken = null;
+      _session.clear(cleared: false);
       _version = null;
     }
   }
@@ -288,42 +295,90 @@ class Surreal {
   // Session
   // ---------------------------------------------------------------------------
 
-  /// Selects the [namespace] and [database] for subsequent operations. A value
-  /// left null keeps the currently selected one.
-  Future<void> use({String? namespace, String? database}) async {
-    final ns = namespace ?? _namespace;
-    final db = database ?? _database;
-    await _rpc('use', [ns, db]);
-    _namespace = ns;
-    _database = db;
+  /// Whether a `use` call can carry NONE to keep a value. A JSON WebSocket
+  /// cannot; over HTTP the client applies `use` itself.
+  bool get _canSendNone {
+    final engine = _engine;
+    return engine is! WebSocketEngine || engine.codec is CborCodec;
+  }
+
+  /// Selects the [namespace] and [database] for subsequent operations.
+  ///
+  /// An argument that is left out keeps its current value, and an argument
+  /// passed as null clears it. Clearing the namespace clears the database
+  /// too, so a database cannot be selected without a namespace.
+  ///
+  /// ```dart
+  /// await db.use(namespace: 'app', database: 'main');
+  /// await db.use(database: 'other'); // same namespace
+  /// await db.use(namespace: null);   // clear both
+  /// ```
+  Future<void> use(
+      {String? namespace = _unchanged, String? database = _unchanged}) async {
+    final keepNamespace = identical(namespace, _unchanged);
+    final keepDatabase = identical(database, _unchanged);
+    if (!keepNamespace &&
+        namespace == null &&
+        database != null &&
+        !keepDatabase) {
+      throw const MissingNamespaceDatabaseError(
+          'A database cannot be selected while clearing the namespace');
+    }
+    // A value that stays the same is sent as it is when it is known, so that
+    // codecs without NONE (JSON) do not clear it, and as NONE otherwise.
+    final clearNamespace = !keepNamespace && namespace == null;
+    Object? currentNamespace = _session.namespace ?? none;
+    Object? currentDatabase = _session.database ?? none;
+    final unknown = (keepNamespace && currentNamespace is SurrealNone) ||
+        (!clearNamespace && keepDatabase && currentDatabase is SurrealNone);
+    if (unknown && !_canSendNone) {
+      // NONE would arrive as null and clear the value, so ask the server
+      // what it has selected and send that back.
+      final [selected] = await query('RETURN [session::ns(), session::db()]');
+      final [ns, db] = selected! as List<Object?>;
+      if (currentNamespace is SurrealNone) currentNamespace = ns;
+      if (currentDatabase is SurrealNone) currentDatabase = db;
+    }
+    await _rpc('use', [
+      keepNamespace ? currentNamespace : namespace,
+      clearNamespace
+          ? null
+          : keepDatabase
+              ? currentDatabase
+              : database,
+    ]);
   }
 
   /// Signs up a new record access user and returns the issued tokens.
-  Future<Tokens> signup(AccessRecordAuth auth) async {
-    final result = await _rpc('signup', [auth.toJson()]);
-    final tokens = _tokensFrom(result);
-    _accessToken = tokens.access;
-    return tokens;
-  }
+  Future<Tokens> signup(AccessRecordAuth auth) async =>
+      _tokensFrom(await _rpc('signup', [auth.toJson()]));
 
   /// Signs in with the given credentials and returns the issued tokens.
-  Future<Tokens> signin(AnyAuth auth) async {
-    final result = await _rpc('signin', [auth.toJson()]);
-    final tokens = _tokensFrom(result);
-    _accessToken = tokens.access;
-    return tokens;
-  }
+  Future<Tokens> signin(AnyAuth auth) async =>
+      _tokensFrom(await _rpc('signin', [auth.toJson()]));
 
   /// Authenticates the current session with an existing token.
   Future<void> authenticate(String token) async {
     await _rpc('authenticate', [token]);
-    _accessToken = token;
   }
 
   /// Invalidates the current session, signing out.
   Future<void> invalidate() async {
     await _rpc('invalidate');
-    _accessToken = null;
+  }
+
+  /// Resets the session: signs out, clears the namespace, database and every
+  /// variable, and stops the session's live queries. The connection stays
+  /// open.
+  Future<void> reset() async {
+    await _rpc('reset');
+    // The server has stopped every live query of the session.
+    final registrations = List.of(_liveByUuid.values);
+    _liveByUuid.clear();
+    for (final registration in registrations) {
+      // Not awaited: a paused listener would hold up the rest.
+      unawaited(registration.query.dispose());
+    }
   }
 
   /// Returns the record associated with the current authentication, or null.
@@ -332,7 +387,14 @@ class Surreal {
     return result as Map<String, dynamic>?;
   }
 
-  /// Defines a connection wide parameter that can be used in queries as `$key`.
+  /// Defines a session wide parameter that can be used in queries as `$key`.
+  ///
+  /// Over WebSocket the parameter lives in the server-side session and is
+  /// set again after a reconnect, so every call sees it. Over HTTP, where
+  /// each request is its own session, the client keeps it and binds it to
+  /// every [query]. The other calls, such as [select] and [create], take no
+  /// variables on the server, so over HTTP they run without it: use [query]
+  /// when they depend on it, for example through table permissions.
   Future<void> set(String key, Object? value) async {
     await _rpc('let', [key, value]);
   }
@@ -455,6 +517,31 @@ class Surreal {
     return query;
   }
 
+  /// Subscribes to a live query that is already running on this session, for
+  /// example one started with a `LIVE SELECT` statement in [query].
+  ///
+  /// The client does not know what the query selects, so it cannot restart
+  /// it after a reconnect: its stream then gets a [LiveQueryLostError] and
+  /// closes. Use [live] for a query that survives reconnects.
+  LiveQuery liveOf(Uuid id) {
+    final engine = _engine;
+    // Without a connection there is no session for the query to run in, and
+    // nothing would ever arrive on, or close, its stream.
+    if (engine == null || engine.status != ConnectionStatus.connected) {
+      throw const ConnectionUnavailableError();
+    }
+    if (!engine.supportsLiveQueries) {
+      throw const UnsupportedFeatureError('live');
+    }
+    // The handle for a query that is already registered is shared, so that
+    // killing one does not leave another open.
+    final existing = _liveByUuid[id.toString()];
+    if (existing != null) return existing.query;
+    final query = LiveQuery(id, _killLive);
+    _liveByUuid[id.toString()] = _LiveRegistration(query, null, false);
+    return query;
+  }
+
   /// Stops the live query with the given [id].
   Future<void> kill(Uuid id) async {
     final registration = _liveByUuid.remove(id.toString());
@@ -479,10 +566,19 @@ class Surreal {
     for (final entry in _liveByUuid.entries.toList()) {
       final oldId = entry.key;
       final registration = entry.value;
+      final resource = registration.resource;
+      if (resource == null) {
+        // Attached with liveOf, so there is nothing to restart it from.
+        _liveByUuid.remove(oldId);
+        registration.query.emitError(LiveQueryLostError(registration.query.id));
+        // Not awaited: a paused listener would hold up every other restart.
+        unawaited(registration.query.dispose());
+        continue;
+      }
       final Uuid uuid;
       try {
         uuid = _asUuid(await _rpc('live', [
-          _thing(registration.resource),
+          _thing(resource),
           registration.diff,
         ]));
       } catch (error, stackTrace) {
@@ -550,6 +646,7 @@ class Surreal {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
     final result = await engine.rpc(method, params);
+    _session.apply(method, params, result);
     return result is SurrealNone && method != 'run' ? null : result;
   }
 
@@ -574,14 +671,11 @@ class Surreal {
   }
 
   Tokens _tokensFrom(Object? result) {
-    if (result is String) return Tokens(access: result);
-    if (result is Map) {
-      return Tokens(
-        access: result['token']?.toString() ?? '',
-        refresh: result['refresh']?.toString(),
-      );
-    }
-    return const Tokens(access: '');
+    final refresh = result is Map ? result['refresh'] : null;
+    return Tokens(
+      access: SessionState.accessTokenOf(result) ?? '',
+      refresh: refresh is String ? refresh : null,
+    );
   }
 
   Uri _httpBase() {
@@ -599,9 +693,9 @@ class Surreal {
   Map<String, String> _httpHeaders({String? contentType, String? accept}) => {
         if (contentType != null) 'Content-Type': contentType,
         if (accept != null) 'Accept': accept,
-        if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
-        if (_namespace != null) 'Surreal-NS': _namespace!,
-        if (_database != null) 'Surreal-DB': _database!,
+        if (_session.token != null) 'Authorization': 'Bearer ${_session.token}',
+        if (_session.namespace != null) 'Surreal-NS': _session.namespace!,
+        if (_session.database != null) 'Surreal-DB': _session.database!,
       };
 }
 

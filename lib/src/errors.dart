@@ -564,3 +564,15 @@ class RequestTimeoutError extends SurrealError {
   /// The timeout that was exceeded.
   final Duration timeout;
 }
+
+/// Delivered on the stream of a live query attached with `liveOf` when the
+/// connection was re-established. The client cannot restart such a query, so
+/// its stream closes after this error.
+class LiveQueryLostError extends SurrealError {
+  LiveQueryLostError(this.id)
+      : super('The live query $id was lost when the connection was '
+            're-established');
+
+  /// The id of the lost live query.
+  final Object id;
+}
