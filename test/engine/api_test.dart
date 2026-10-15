@@ -50,6 +50,12 @@ void main() {
     expect(sentHeaders(), {'x-tenant': 'b'});
   });
 
+  test('a call without query parameters sends an empty map', () async {
+    await db.api.get('/x');
+    final bindings = server.requests.last.params[1] as Map;
+    expect((bindings['request'] as Map)['query'], isEmpty);
+  });
+
   test('response header names are in lower case', () async {
     final response = await db.api.get('/x');
     expect(response.headers, {'content-type': 'text/plain'});

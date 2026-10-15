@@ -50,7 +50,8 @@ final class SurrealApi {
             for (final MapEntry(:key, :value) in (headers ?? const {}).entries)
               key.toLowerCase(): value,
           },
-          if (query != null) 'query': query,
+          // Empty rather than left out, as for a request over HTTP.
+          'query': query ?? const <String, String>{},
           // An explicit null is sent as NULL; a body left out arrives as NONE.
           if (body is! _NoBody) 'body': body,
         },
