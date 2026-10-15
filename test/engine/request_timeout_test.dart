@@ -2,6 +2,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
@@ -53,5 +54,32 @@ void main() {
         db.query('SLEEP 1h').then((_) => completed = true, onError: (_) {}));
     await Future<void>.delayed(const Duration(milliseconds: 200));
     expect(completed, isFalse);
+  });
+
+  test('a timed out HTTP request is aborted', () async {
+    // A server that accepts connections and never answers them.
+    final silent = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(silent.close);
+    var accepted = 0;
+    var open = 0;
+    silent.listen((socket) {
+      accepted++;
+      open++;
+      socket.listen((_) {},
+          onDone: () {
+            open--;
+            socket.destroy();
+          },
+          onError: (_) => open--);
+    });
+
+    await db.connect('http://127.0.0.1:${silent.port}/rpc',
+        options: const ConnectOptions(
+            versionCheck: false, requestTimeout: Duration(milliseconds: 300)));
+    await expectLater(
+        db.query('RETURN 1'), throwsA(isA<RequestTimeoutError>()));
+    expect(accepted, 1);
+    // The client closed the connection rather than leaving it waiting.
+    await eventually(() => open == 0);
   });
 }

@@ -1,5 +1,4 @@
 import '../value/value.dart';
-import 'rpc.dart';
 
 /// The state of one server-side session, as the client knows it: the
 /// selected namespace and database, the access token and the variables set
@@ -24,6 +23,17 @@ class SessionState {
   /// The refresh token issued with [token], if any.
   String? get refreshToken => _refreshToken;
 
+  String? _expectedAccess;
+  String? _expectedRefresh;
+
+  /// Records that an `authenticate` call with [access] comes with
+  /// [refresh], so that the call's success sets both tokens in one change.
+  /// Pass nulls to forget it.
+  void expectTokens(String? access, String? refresh) {
+    _expectedAccess = access;
+    _expectedRefresh = refresh;
+  }
+
   /// Replaces both tokens at once.
   void setTokens(String? access, String? refresh) {
     if (access == _token && refresh == _refreshToken) return;
@@ -44,9 +54,15 @@ class SessionState {
         setTokens(accessTokenOf(result), refreshTokenOf(result));
       case 'authenticate':
         final access = params.isNotEmpty ? params[0] as String? : null;
+        // A refresh token given with the access token arrives with it.
         // Re-authenticating with the same token, as a reconnect does, keeps
         // its refresh token.
-        setTokens(access, access == _token ? _refreshToken : null);
+        final refresh = access != null && access == _expectedAccess
+            ? _expectedRefresh
+            : access == _token
+                ? _refreshToken
+                : null;
+        setTokens(access, refresh);
       case 'invalidate':
         setTokens(null, null);
       case 'let':
@@ -57,8 +73,9 @@ class SessionState {
         if (value is SurrealNone) {
           variables.remove(key);
         } else {
-          // A copy, so the value replayed later is the value that was sent.
-          variables[key] = snapshotValue(value);
+          // The engines pass the value as it was encoded, so later changes
+          // to the caller's objects do not reach it.
+          variables[key] = value;
         }
       case 'unset':
         variables.remove(params[0] as String);

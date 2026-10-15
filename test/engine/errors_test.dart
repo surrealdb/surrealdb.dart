@@ -123,4 +123,45 @@ void main() {
     expect(error, isA<InternalError>());
     expect(error, isNot(isA<ThrownError>()));
   });
+
+  test('the helpers read the legacy codes when there is no detail', () {
+    final timedOut = decode({'code': -32004, 'message': 'x'});
+    expect(timedOut, isA<QueryError>());
+    expect((timedOut as QueryError).isTimedOut, isTrue);
+    expect(timedOut.isCancelled, isFalse);
+    expect(timedOut.timeout, isNull);
+    expect((decode({'code': -32005, 'message': 'x'}) as QueryError).isCancelled,
+        isTrue);
+    expect(
+        (decode({'code': -32009, 'message': 'x'}) as QueryError)
+            .isTransactionConflict,
+        isTrue);
+    expect(
+        (decode({'code': -32003, 'message': 'x'}) as QueryError).isNotExecuted,
+        isTrue);
+    expect(
+        (decode({'code': -32700, 'message': 'x'}) as ValidationError)
+            .isParseError,
+        isTrue);
+    expect(
+        (decode({'code': -32604, 'message': 'x'}) as ConfigurationError)
+            .isLiveQueryNotSupported,
+        isTrue);
+    expect(
+        (decode({'code': -32008, 'message': 'x'}) as SerializationError)
+            .isDeserialization,
+        isTrue);
+    final auth = decode({'code': -32002, 'message': 'x'}) as NotAllowedError;
+    expect(auth.isInvalidAuth, isTrue);
+    expect(auth.isAuthError, isTrue);
+    // A structured detail still decides.
+    final structured = decode({
+      'code': -32004,
+      'message': 'x',
+      'kind': 'Query',
+      'details': {'kind': 'Cancelled'},
+    }) as QueryError;
+    expect(structured.isTimedOut, isFalse);
+    expect(structured.isCancelled, isTrue);
+  });
 }

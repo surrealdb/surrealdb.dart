@@ -23,11 +23,11 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Renews the session's tokens before they expire.
   _TokenRenewal get _renewal;
 
-  /// Called before a call that replaces the session's authentication.
-  Future<void> _authChanging() async {
-    _renewal.credentials = null;
-    await _renewal.settled();
-  }
+  /// Runs [call], which changes the session's authentication, with token
+  /// renewal held off. See [_TokenRenewal.during].
+  Future<T> _changingAuth<T>(Future<T> Function() call,
+          {bool keepCredentials = false}) =>
+      _renewal.during(call, keepCredentials: keepCredentials);
 
   @override
   Future<Object?> _call(String method, [List<Object?> params = const []]) =>
@@ -105,39 +105,39 @@ mixin SurrealSessionMethods on SurrealQueryable {
   }
 
   /// Signs up a new record access user and returns the issued tokens.
-  Future<Tokens> signup(AccessRecordAuth auth) async {
-    await _authChanging();
-    return _tokensFrom(await _call('signup', [auth.toJson()]));
-  }
+  Future<Tokens> signup(AccessRecordAuth auth) => _changingAuth(
+      () async => _tokensFrom(await _call('signup', [auth.toJson()])));
 
   /// Signs in with the given credentials and returns the issued tokens.
-  Future<Tokens> signin(AnyAuth auth) async {
-    await _authChanging();
-    return _tokensFrom(await _call('signin', [auth.toJson()]));
-  }
+  Future<Tokens> signin(AnyAuth auth) => _changingAuth(
+      () async => _tokensFrom(await _call('signin', [auth.toJson()])));
 
   /// Authenticates the session with an existing access [token].
   ///
   /// Pass the [refreshToken] issued with it to let the client refresh the
   /// session: straight away when [token] has already expired or is
   /// rejected, and automatically before it expires.
-  Future<void> authenticate(String token, {String? refreshToken}) async {
-    await _authChanging();
-    final expiry = tokenExpiry(token);
-    final expired = expiry != null && !expiry.isAfter(DateTime.now().toUtc());
-    if (refreshToken != null && expired) {
-      await refresh(Tokens(access: token, refresh: refreshToken));
-      return;
-    }
-    try {
-      await _call('authenticate', [token]);
-    } on NotAllowedError {
-      if (refreshToken == null) rethrow;
-      await refresh(Tokens(access: token, refresh: refreshToken));
-      return;
-    }
-    _state.setTokens(token, refreshToken);
-  }
+  Future<void> authenticate(String token, {String? refreshToken}) =>
+      _changingAuth(() async {
+        final expiry = tokenExpiry(token);
+        final expired =
+            expiry != null && !expiry.isAfter(DateTime.now().toUtc());
+        if (refreshToken != null && expired) {
+          await refresh(Tokens(access: token, refresh: refreshToken));
+          return;
+        }
+        // The session takes both tokens at once, when the call succeeds.
+        _state.expectTokens(token, refreshToken);
+        try {
+          await _call('authenticate', [token]);
+        } on NotAllowedError {
+          if (refreshToken == null) rethrow;
+          await refresh(Tokens(access: token, refresh: refreshToken));
+          return;
+        } finally {
+          _state.expectTokens(null, null);
+        }
+      });
 
   /// Exchanges a refresh token for a new access token and refresh token, and
   /// authenticates the session with them. Uses the session's own [tokens]
@@ -146,44 +146,39 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// A refresh token can be used once: the server revokes it as it issues
   /// the new one. Needs SurrealDB 3.0 or later and an access method defined
   /// `WITH REFRESH`.
-  Future<Tokens> refresh([Tokens? tokens]) async {
-    await _renewal.settled();
-    final current = tokens ?? this.tokens;
-    if (current?.refresh == null) {
-      throw const AuthenticationError(
-          'There is no refresh token to refresh the session with');
-    }
-    return _tokensFrom(await _call('refresh', [current!.toJson()]));
-  }
+  Future<Tokens> refresh([Tokens? tokens]) => _changingAuth(() async {
+        final current = tokens ?? this.tokens;
+        if (current?.refresh == null) {
+          throw const AuthenticationError(
+              'There is no refresh token to refresh the session with');
+        }
+        return _tokensFrom(await _call('refresh', [current!.toJson()]));
+      }, keepCredentials: true);
 
   /// Revokes a refresh token so it can no longer be used. Uses the session's
   /// own [tokens] unless others are given. The session stays authenticated
   /// until its access token expires, but can no longer be refreshed.
-  Future<void> revoke([Tokens? tokens]) async {
-    await _renewal.settled();
-    final current = tokens ?? this.tokens;
-    final refreshToken = current?.refresh;
-    if (refreshToken == null) {
-      throw const AuthenticationError('There is no refresh token to revoke');
-    }
-    await _call('revoke', [current!.toJson()]);
-    if (_state.refreshToken == refreshToken) {
-      _state.setTokens(_state.token, null);
-    }
-  }
+  Future<void> revoke([Tokens? tokens]) => _changingAuth(() async {
+        final current = tokens ?? this.tokens;
+        final refreshToken = current?.refresh;
+        if (refreshToken == null) {
+          throw const AuthenticationError(
+              'There is no refresh token to revoke');
+        }
+        await _call('revoke', [current!.toJson()]);
+        if (_state.refreshToken == refreshToken) {
+          _state.setTokens(_state.token, null);
+        }
+      }, keepCredentials: true);
 
   /// Invalidates the session, signing out.
-  Future<void> invalidate() async {
-    await _authChanging();
-    await _call('invalidate');
-  }
+  Future<void> invalidate() => _changingAuth(() => _call('invalidate'));
 
   /// Resets the session: signs out, clears the namespace, database and every
   /// variable, cancels its transactions and stops its live queries. The
   /// connection stays open.
   Future<void> reset() async {
-    await _authChanging();
-    await _call('reset');
+    await _changingAuth(() => _call('reset'));
     // The server has stopped every live query of the session.
     await _client._disposeLiveQueries(_sessionId);
   }
@@ -197,8 +192,11 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Defines a session wide parameter that can be used in queries as `$key`.
   ///
   /// Over WebSocket the parameter lives in the server-side session and is
-  /// set again after a reconnect. Over HTTP, where each request is its own
-  /// session, the client keeps it and binds it to every query.
+  /// set again after a reconnect, so every call sees it. Over HTTP, where
+  /// each request is its own session, the client keeps it and binds it to
+  /// every [query]. The other calls, such as [select] and [create], take no
+  /// variables on the server, so over HTTP they run without it: use [query]
+  /// when they depend on it, for example through table permissions.
   Future<void> set(String key, Object? value) async {
     await _call('let', [key, value]);
   }
@@ -232,7 +230,11 @@ mixin SurrealSessionMethods on SurrealQueryable {
   LiveQuery liveOf(Uuid id) {
     _checkOpen();
     final engine = _client._engine;
-    if (engine == null) throw const ConnectionUnavailableError();
+    // Without a connection there is no session for the query to run in, and
+    // nothing would ever arrive on, or close, its stream.
+    if (engine == null || engine.status != ConnectionStatus.connected) {
+      throw const ConnectionUnavailableError();
+    }
     if (!engine.supportsLiveQueries) {
       throw const UnsupportedFeatureError('live');
     }
@@ -245,9 +247,14 @@ mixin SurrealSessionMethods on SurrealQueryable {
 
   /// Stops the live query with the given [id].
   Future<void> kill(Uuid id) async {
-    final registration = _client._liveByUuid.remove(id.toString());
     await _call('kill', [id]);
-    await registration?.query.dispose();
+    // A kill stops only a query of this session, so a query registered by
+    // another session keeps its handle.
+    final registration = _client._liveByUuid[id.toString()];
+    if (registration != null && registration.session == _sessionId) {
+      _client._liveByUuid.remove(id.toString());
+      await registration.query.dispose();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -266,9 +273,15 @@ mixin SurrealSessionMethods on SurrealQueryable {
   /// Starts a new session on the same connection that begins as a copy of
   /// this one: the same namespace, database, variables and authentication.
   /// From then on the two are independent.
+  ///
+  /// The fork gets the access token but not the refresh token, which can be
+  /// used only once. It renews by signing in again when this session has
+  /// the credentials to (those given to `connect`), and otherwise stays
+  /// authenticated until the access token expires.
   Future<SurrealSession> forkSession() async {
     _checkOpen();
-    return _client._attachSession(copyOf: _state.copy());
+    return _client._attachSession(
+        copyOf: _state.copy(), credentials: _renewal.credentials);
   }
 }
 
@@ -331,7 +344,12 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
     _client._attached.remove(id);
     _client._engine?.untrackSession(id);
     await _client._disposeLiveQueries(id);
-    await _client._rpc('detach', const [], session: id);
+    try {
+      await _client._rpc('detach', const [], session: id);
+    } on ConnectionUnavailableError {
+      // The connection is down. Its sessions went with it, and this one is
+      // no longer tracked, so it is not attached again.
+    }
   }
 
   @override

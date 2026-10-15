@@ -75,6 +75,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     ..onTokensChanged = _onTokensChanged;
   String? _version;
   SurrealCodec _codec = const CborCodec();
+  var _versionCheck = true;
+
+  /// Whether the codec is the built-in one for the format, rather than one
+  /// the caller supplied.
+  var _ownCodec = true;
 
   // Token renewal.
   var _renewTokens = true;
@@ -153,14 +158,17 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     final engine = _engineFor(uri, options);
     _engine = engine;
     _url = uri;
-    engine.onReconnect = _restartLiveQueries;
+    _versionCheck = options.versionCheck;
+    engine.onReconnect = _onReconnect;
     engine.onAuthenticationLost = (_) => _session.setTokens(null, null);
     _renewTokens = options.renewTokens;
     _tokenExpiryMargin = options.tokenExpiryMargin;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_statusController.add);
 
+    _ownCodec = options.codec == null;
     await engine.open(uri, timeout: options.timeout);
+    _adaptCodec();
 
     if (options.versionCheck) {
       try {
@@ -168,15 +176,6 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
       } catch (_) {
         await close();
         rethrow;
-      }
-      // Servers before 3.0 have no set type and reject its CBOR tag.
-      final codec = engine.codec;
-      final major = _parseVersion(_version ?? '')?.first;
-      if (codec is CborCodec &&
-          !codec.setsAsArrays &&
-          major != null &&
-          major < 3) {
-        engine.codec = const CborCodec(setsAsArrays: true);
       }
     }
     if (options.namespace != null || options.database != null) {
@@ -254,7 +253,24 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     final version =
         result is Map ? result['version']?.toString() : result?.toString();
     _version = version;
+    _adaptCodec();
     return version ?? '';
+  }
+
+  /// Encodes sets as SurrealDB sets only for a server known to be 3.0 or
+  /// later. Older servers have no set type and reject its CBOR tag, so sets
+  /// go to them, and to a server whose version is not known, as arrays. A
+  /// codec given in [ConnectOptions.codec] is left as it is.
+  void _adaptCodec() {
+    final engine = _engine;
+    if (engine == null || !_ownCodec) return;
+    final codec = engine.codec;
+    if (codec is! CborCodec) return;
+    final major = _parseVersion(_version ?? '')?.first;
+    final arrays = major == null || major < 3;
+    if (codec.setsAsArrays != arrays) {
+      engine.codec = CborCodec(setsAsArrays: arrays);
+    }
   }
 
   /// Checks that the server is reachable and healthy. Throws on failure.
@@ -305,7 +321,8 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     return [for (final id in result as List) _asUuid(id)];
   }
 
-  Future<SurrealSession> _attachSession({SessionState? copyOf}) async {
+  Future<SurrealSession> _attachSession(
+      {SessionState? copyOf, AnyAuth? credentials}) async {
     final engine = _requireSessions('sessions');
     final id = Uuid.v4();
     final state = SessionState();
@@ -313,6 +330,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     engine.trackSession(id, state);
     final session = SurrealSession._(this, id, state);
     state.onTokensChanged = session._renewal.reschedule;
+    session._renewal.credentials = credentials;
     _attached[id] = session;
     if (copyOf != null) {
       try {
@@ -322,10 +340,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
         for (final MapEntry(:key, :value) in copyOf.variables.entries) {
           await _rpc('let', [key, value], session: id);
         }
+        // The access token is shared, but not the refresh token: it can be
+        // used only once, so two sessions renewing with it would fail.
         final token = copyOf.token;
         if (token != null) {
           await _rpc('authenticate', [token], session: id);
-          state.setTokens(token, copyOf.refreshToken);
         }
       } catch (_) {
         await session.close();
@@ -360,8 +379,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   Future<void> _killLive(LiveQuery query) async {
-    final registration = _liveByUuid.remove(query.id.toString());
+    final registration = _liveByUuid[query.id.toString()];
+    // Sent in the session the query runs in, and forgotten only once the
+    // server has stopped it.
     await _rpc('kill', [query.id], session: registration?.session);
+    _liveByUuid.remove(query.id.toString());
     await query.dispose();
   }
 
@@ -385,6 +407,24 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   /// Starts every registered live query again after a reconnect. Each query
   /// is restarted on its own: one that fails keeps its registration, receives
   /// the error on its stream, and is tried again on the next reconnect.
+  /// Runs after the WebSocket engine reconnects. The server behind the URL
+  /// may have changed, so its version is checked again before live queries
+  /// are restarted. An unsupported server closes the client.
+  Future<void> _onReconnect() async {
+    if (_versionCheck) {
+      try {
+        await _checkVersion();
+      } on UnsupportedVersionError catch (error, stackTrace) {
+        for (final registration in List.of(_liveByUuid.values)) {
+          registration.query.emitError(error, stackTrace);
+        }
+        await close();
+        return;
+      }
+    }
+    await _restartLiveQueries();
+  }
+
   Future<void> _restartLiveQueries() async {
     for (final entry in _liveByUuid.entries.toList()) {
       final oldId = entry.key;
