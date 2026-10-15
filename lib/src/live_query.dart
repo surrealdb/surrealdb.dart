@@ -30,6 +30,13 @@ class LiveQuery {
     if (!_controller.isClosed) _controller.add(message);
   }
 
+  /// Used by the driver to report that the query could not be restarted
+  /// after a reconnect. The query stays registered and is retried on the next
+  /// reconnect.
+  void emitError(Object error, [StackTrace? stackTrace]) {
+    if (!_controller.isClosed) _controller.addError(error, stackTrace);
+  }
+
   /// Used by the driver to update the id after a reconnect.
   void rebind(Uuid id) => _id = id;
 

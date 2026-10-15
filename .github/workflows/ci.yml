@@ -18,7 +18,7 @@ jobs:
       - name: Analyze
         run: dart analyze --fatal-infos
       - name: Run unit tests
-        run: dart test test/cbor test/value test/memory
+        run: dart test test/cbor test/engine test/json test/memory test/value
 
   integration:
     runs-on: ubuntu-latest
@@ -41,4 +41,6 @@ jobs:
       - name: Run integration tests
         env:
           SURREAL_INTEGRATION: '1'
-        run: dart test test/integration
+        # The test files share one database, so run them one at a time to
+        # avoid write conflicts between them.
+        run: dart test --concurrency=1 test/integration
