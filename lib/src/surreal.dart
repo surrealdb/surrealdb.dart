@@ -73,7 +73,11 @@ class Surreal {
   // Token renewal.
   var _renewTokens = true;
   var _tokenExpiryMargin = const Duration(seconds: 60);
-  AnyAuth? _renewWith;
+
+  /// The credentials given to [connect], as sent, to sign in with again. A
+  /// copy, so that changes to the caller's objects since do not change who
+  /// signs in.
+  Map<String, Object?>? _renewWith;
   Timer? _renewalTimer;
 
   /// How many renewals in a row have failed, for backing off.
@@ -189,8 +193,8 @@ class Surreal {
     final credentials = options.authentication;
     if (credentials != null) {
       // Without a refresh token, renewal signs in again with these.
-      _renewWith = credentials;
-      await _rpc('signin', [credentials.toJson()]);
+      final params = _renewWith = _copyOf(credentials.toJson());
+      await _rpc('signin', [params]);
     } else if (options.token != null) {
       await authenticate(options.token!, refreshToken: options.refreshToken);
     }
@@ -440,7 +444,7 @@ class Surreal {
     final credentials = _renewWith;
     if (!_renewTokens || credentials == null) return;
     try {
-      await call('signin', [credentials.toJson()]);
+      await call('signin', [credentials]);
     } on ResponseError catch (error) {
       // Credentials that no longer work stay rejected; anything else fails
       // the attempt, which is tried again.
@@ -571,13 +575,16 @@ class Surreal {
     try {
       final credentials = _renewWith;
       final refreshToken = _session.refreshToken;
+      final namespace = _session.replayNamespace;
+      final database = _session.replayDatabase;
       if (refreshToken != null) {
         await _rpc('refresh', [
           Tokens(access: token, refresh: refreshToken).toJson(),
         ]);
       } else if (credentials != null) {
-        await _rpc('signin', [credentials.toJson()]);
+        await _rpc('signin', [credentials]);
       }
+      await _selectAgain(namespace, database);
       // A server may give the same token back, which renews nothing and
       // schedules nothing.
       if (_session.token == token && _renewalTimer == null) _retryRenewal();
@@ -608,6 +615,28 @@ class Surreal {
       done.complete();
     }
   }
+
+  /// Selects [namespace] and [database] again, as replay values, when
+  /// signing in again selected others: what the new token names.
+  Future<void> _selectAgain(Object? namespace, Object? database) async {
+    if (_session.replayNamespace == namespace &&
+        _session.replayDatabase == database) {
+      return;
+    }
+    try {
+      await use(
+        namespace: namespace is SurrealNone ? _unchanged : namespace as String?,
+        database: database is SurrealNone ? _unchanged : database as String?,
+      );
+    } on SurrealError {
+      // The session stays as signing in left it, which is what it reports.
+    }
+  }
+
+  /// A deep copy of [value], made by encoding and decoding it.
+  static Map<String, Object?> _copyOf(Map<String, Object?> value) =>
+      (const CborCodec().decode(const CborCodec().encode(value)) as Map)
+          .cast<String, Object?>();
 
   static Duration _untilExpiry(DateTime expiry) {
     final left = expiry.difference(DateTime.now().toUtc());
