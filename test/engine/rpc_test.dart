@@ -102,6 +102,11 @@ void main() {
     expect(parseRecordId('person:1'), const RecordId('person', 1));
     expect(parseRecordId('person:-5'), const RecordId('person', -5));
     expect(parseRecordId('person:`a b`'), const RecordId('person', 'a b'));
+    // As the server writes them, with escapes.
+    expect(parseRecordId(r'`per\`son`:`line\nfeed`'),
+        const RecordId('per`son', 'line\nfeed'));
+    expect(parseRecordId(r'x:`back\\slash\u{e9}`'),
+        const RecordId('x', 'back\\slash\u{e9}'));
     expect(parseRecordId(r'person:`a\`b`'), const RecordId('person', 'a`b'));
     expect(parseRecordId('person:⟨a b⟩'), const RecordId('person', 'a b'));
     expect(parseRecordId('`my table`:x'), const RecordId('my table', 'x'));

@@ -176,9 +176,11 @@ Future<void> eventually(bool Function() condition,
 
 /// A JWT whose payload expires [expiresIn] from now. The signature is not
 /// valid; only the client reads it.
-String fakeJwt(Duration expiresIn, {String id = 'a'}) {
+String fakeJwt(Duration expiresIn,
+    {String id = 'a', Map<String, Object?> claims = const {}}) {
   String encode(Map<String, Object?> json) =>
       base64Url.encode(utf8.encode(jsonEncode(json))).replaceAll('=', '');
   final exp = DateTime.now().add(expiresIn).millisecondsSinceEpoch ~/ 1000;
-  return '${encode({'alg': 'HS512'})}.${encode({'exp': exp, 'jti': id})}.sig';
+  return '${encode({'alg': 'HS512'})}.'
+      '${encode({'exp': exp, 'jti': id, ...claims})}.sig';
 }
