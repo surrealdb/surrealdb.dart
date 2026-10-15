@@ -163,6 +163,10 @@ class WebSocketEngine implements Engine {
       result = await completer.future.timeout(timeout, onTimeout: () {
         // Forget the request, so a late reply is dropped.
         _pending.remove(id);
+        // The server may still have applied a change to the session, so it
+        // may no longer match the one tracked here. Start again on a new
+        // socket, which restores the session as it is known.
+        if (_sessionMethods.contains(method)) _resetChannel(channel);
         throw RequestTimeoutError(method, timeout);
       });
     }
@@ -172,6 +176,27 @@ class WebSocketEngine implements Engine {
 
   List<Object?> _paramsOf(List<int> payload) =>
       ((_codec.decode(payload) as Map)['params'] as List).cast<Object?>();
+
+  /// Calls that change the server's session.
+  static const _sessionMethods = {
+    'use',
+    'signin',
+    'signup',
+    'authenticate',
+    'invalidate',
+    'let',
+    'unset',
+  };
+
+  /// Abandons [channel] as if the server had dropped it, so the usual
+  /// reconnect follows.
+  void _resetChannel(WebSocketChannel channel) {
+    if (!identical(_channel, channel)) return;
+    final subscription = _subscription;
+    _onDisconnected(null);
+    unawaited(subscription?.cancel());
+    unawaited(_closeChannel(channel));
+  }
 
   void _trackSession(String method, List<Object?> params, Object? result) {
     switch (method) {
