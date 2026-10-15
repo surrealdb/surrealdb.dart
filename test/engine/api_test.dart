@@ -17,7 +17,10 @@ void main() {
             {
               'status': 'OK',
               'time': '1ms',
-              'result': {'status': 200},
+              'result': {
+                'status': 200,
+                'headers': {'Content-Type': 'text/plain'},
+              },
             },
           ])
         : FakeSurrealServer.defaultReply(r);
@@ -45,5 +48,10 @@ void main() {
 
     await db.api.header('X-Tenant', 'a').get('/x', headers: {'x-TENANT': 'b'});
     expect(sentHeaders(), {'x-tenant': 'b'});
+  });
+
+  test('response header names are in lower case', () async {
+    final response = await db.api.get('/x');
+    expect(response.headers, {'content-type': 'text/plain'});
   });
 }
