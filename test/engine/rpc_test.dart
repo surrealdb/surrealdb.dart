@@ -134,6 +134,15 @@ void main() {
       SurrealDateTime.parse('2024-01-01T00:00:00Z'),
       Uuid('018f1c8e-7d2a-7cc0-9a1b-1234567890ab'),
     ]);
+    // Strings are written with escapes, as the server writes them.
+    expect(
+        parseRecordId(
+                r'''item:["line\nfeed\ttab\\back'q\"dq", 'caf\u{e9}\u00e9']''')
+            ?.id,
+        ['line\nfeed\ttab\\back\'q"dq', 'café\u00e9']);
+    // Datetimes keep their nanoseconds.
+    expect(parseRecordId("event:[d'2026-01-01T00:00:00.123456789Z']")?.id,
+        [SurrealDateTime(1767225600, 123456789)]);
     expect(parseRecordId('person:[1, '), isNull);
     expect(parseRecordId('person'), isNull);
   });

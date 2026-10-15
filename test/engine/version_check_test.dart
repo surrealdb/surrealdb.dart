@@ -92,6 +92,54 @@ void main() {
       expect(server.methods.where((m) => m == 'live'), hasLength(1));
     });
 
+    test('an unsupported server is never reported as connected', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      await db.use(namespace: 'ns', database: 'db');
+      final statuses = <ConnectionStatus>[];
+      db.statusChanges.listen(statuses.add);
+      server.requests.clear();
+
+      server.handler = versionIs('surrealdb-5.0.0');
+      await server.dropAll();
+      await eventually(() => db.status == ConnectionStatus.disconnected);
+      expect(statuses, isNot(contains(ConnectionStatus.connected)));
+      // Nothing of the session was sent to it.
+      expect(server.methods, ['version']);
+    });
+
+    test('a failed version check is a failed reconnect attempt', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      addTearDown(db.close);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      await db.live('person');
+
+      var failures = 0;
+      server.handler = (request) =>
+          request.method == 'version' && failures++ < 2
+              ? const FakeError('There was a problem with the database')
+              : FakeSurrealServer.defaultReply(request);
+      server.requests.clear();
+      await server.dropAll();
+
+      await eventually(() => server.methods.contains('live'));
+      expect(db.status, ConnectionStatus.connected);
+      expect(server.methods.where((m) => m == 'version'), hasLength(3));
+      expect(server.accepted, 4);
+    });
+
     test('can be turned off', () async {
       server.handler = versionIs('surrealdb-5.0.0');
       final db = Surreal();

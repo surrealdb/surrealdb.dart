@@ -58,6 +58,13 @@ class HttpEngine implements Engine {
   Stream<LiveMessage> get liveNotifications => const Stream.empty();
 
   @override
+  set onVerify(
+      Future<void> Function(
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
+
+  @override
   set onReconnect(Future<void> Function()? handler) {}
 
   @override
