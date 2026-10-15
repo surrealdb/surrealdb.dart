@@ -18,18 +18,27 @@ final class SurrealDuration extends SurrealValue {
 
   /// Builds a duration from a Dart [Duration]. Dart durations have microsecond
   /// precision, so the nanosecond remainder is always a multiple of 1000.
+  ///
+  /// A negative duration has negative [seconds] and a [nanoseconds] remainder
+  /// that counts forwards from them, so -1 microsecond is `-1` seconds plus
+  /// 999999000 nanoseconds. SurrealDB itself only stores durations of zero or
+  /// more.
   factory SurrealDuration.fromDart(Duration duration) {
     final micros = duration.inMicroseconds;
+    final remainder = micros % 1000000;
     return SurrealDuration(
-      seconds: micros ~/ 1000000,
-      nanoseconds: (micros % 1000000) * _nanosPerMicro,
+      seconds: (micros - remainder) ~/ 1000000,
+      nanoseconds: remainder * _nanosPerMicro,
     );
   }
 
-  factory SurrealDuration.nanoseconds(int value) => SurrealDuration(
-        seconds: value ~/ _nanosPerSecond,
-        nanoseconds: value % _nanosPerSecond,
-      );
+  factory SurrealDuration.nanoseconds(int value) {
+    final remainder = value % _nanosPerSecond;
+    return SurrealDuration(
+      seconds: (value - remainder) ~/ _nanosPerSecond,
+      nanoseconds: remainder,
+    );
+  }
 
   factory SurrealDuration.microseconds(int value) =>
       SurrealDuration.nanoseconds(value * _nanosPerMicro);
@@ -119,9 +128,22 @@ final class SurrealDuration extends SurrealValue {
   @override
   String toJson() => toString();
 
+  /// Whether this duration is less than zero.
+  bool get isNegative => seconds < 0;
+
   @override
   String toString() {
     if (seconds == 0 && nanoseconds == 0) return '0ns';
+    if (isNegative) {
+      // Negate as (seconds, nanoseconds) to stay exact for large values.
+      final positive = nanoseconds == 0
+          ? SurrealDuration(seconds: -seconds)
+          : SurrealDuration(
+              seconds: -seconds - 1,
+              nanoseconds: _nanosPerSecond - nanoseconds,
+            );
+      return '-$positive';
+    }
     final buffer = StringBuffer();
     var remaining = seconds;
     void unit(int size, String suffix) {

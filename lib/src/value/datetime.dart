@@ -9,11 +9,16 @@ final class SurrealDateTime extends SurrealValue {
             'nanoseconds must be in the range 0 to 999999999');
 
   /// Builds a value from a Dart [DateTime].
+  ///
+  /// Before 1970 the seconds are negative and the nanoseconds still count
+  /// forwards from them, so one microsecond before the epoch is `-1` seconds
+  /// plus 999999000 nanoseconds.
   factory SurrealDateTime.fromDateTime(DateTime value) {
     final micros = value.toUtc().microsecondsSinceEpoch;
+    final remainder = micros % 1000000;
     return SurrealDateTime(
-      micros ~/ 1000000,
-      (micros % 1000000) * 1000,
+      (micros - remainder) ~/ 1000000,
+      remainder * 1000,
     );
   }
 
