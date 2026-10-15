@@ -129,6 +129,69 @@ void main() {
     expect(committedAfterEnd, isTrue);
   });
 
+  test('commit waits for a stream still being read to end', () async {
+    final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
+    await connect('surrealdb-3.3.4');
+    var ended = false;
+    bool? committedAfterEnd;
+    server.handler = (r) {
+      switch (r.method) {
+        case 'begin':
+          return FakeResult(txn);
+        case 'query_stream':
+          Timer(const Duration(milliseconds: 200), () {
+            ended = true;
+            server.push({
+              'id': r.id,
+              'result': {'stream': 'end', 'results': 1, 'time': '1ms'},
+            });
+          });
+          return FakeResults(frames.sublist(0, 2));
+        case 'commit':
+          committedAfterEnd = ended;
+          return const FakeResult(null);
+        default:
+          return FakeSurrealServer.defaultReply(r);
+      }
+    };
+    final transaction = await db.beginTransaction();
+    final read = transaction.queryStream('SELECT * FROM big').toList();
+    await eventually(() => server.methods.contains('query_stream'));
+    await transaction.commit();
+    expect(committedAfterEnd, isTrue);
+    await read;
+  });
+
+  test('streaming is tried again after a reconnect', () async {
+    await db.connect(server.url,
+        options: const ConnectOptions(
+          versionCheck: false,
+          reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          ),
+        ));
+    server.handler = (r) => switch (r.method) {
+          'query_stream' => const FakeError('Method not found', code: -32601),
+          'query' => const FakeResult([
+              {'status': 'OK', 'time': '1ms', 'result': 1},
+            ]),
+          _ => FakeSurrealServer.defaultReply(r),
+        };
+    await db.queryStream('q').drain<void>();
+
+    server.handler = (r) => switch (r.method) {
+          'query_stream' => const FakeResults(frames),
+          _ => FakeSurrealServer.defaultReply(r),
+        };
+    await server.dropAll();
+    await eventually(
+        () => db.status == ConnectionStatus.connected && server.accepted == 2);
+    server.requests.clear();
+    await db.queryStream('q').drain<void>();
+    expect(server.methods, contains('query_stream'));
+  });
+
   test('a stream with no first reply times out', () async {
     await db.connect(server.url,
         options: const ConnectOptions(

@@ -326,6 +326,9 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   Future<void> _verifyServer(
       Future<Object?> Function(String method, List<Object?> params)
           call) async {
+    // The server behind the URL may have changed, so streaming is tried
+    // again.
+    _streamingUnsupported = false;
     if (!_versionCheck) {
       // The server may have changed, and its version is not checked, so
       // forget the old one and send sets as arrays again.
