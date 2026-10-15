@@ -129,6 +129,9 @@ class HttpEngine implements Engine {
         : await request.timeout(timeout,
             onTimeout: () => throw RequestTimeoutError(method, timeout));
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      // Prefer the server's own error, when the body carries one.
+      final error = _tryDecodeError(response.bodyBytes);
+      if (error != null) throw error;
       throw HttpConnectionError(
         'Request failed with status ${response.statusCode}',
         statusCode: response.statusCode,
@@ -137,6 +140,14 @@ class HttpEngine implements Engine {
     final decoded = _protocol.decodeResponse(response.bodyBytes);
     if (decoded.error != null) throw decoded.error!;
     return decoded.result;
+  }
+
+  ResponseError? _tryDecodeError(List<int> body) {
+    try {
+      return _protocol.decodeResponse(body).error;
+    } catch (_) {
+      return null;
+    }
   }
 
   String? _extractToken(Object? result) {

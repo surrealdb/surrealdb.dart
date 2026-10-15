@@ -73,10 +73,7 @@ class RpcProtocol {
     if (error is Map) {
       return RpcResponse(
         id: map['id']?.toString() ?? '',
-        error: ResponseError(
-          error['message']?.toString() ?? 'RPC error',
-          code: error['code'] is int ? error['code'] as int : null,
-        ),
+        error: ServerError.fromRpc(error),
       );
     }
     return RpcResponse(id: map['id']?.toString() ?? '', result: map['result']);

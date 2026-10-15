@@ -267,7 +267,8 @@ class Surreal {
   // ---------------------------------------------------------------------------
 
   /// Runs a SurrealQL query and returns the result of each statement in order.
-  /// Throws a [QueryStatementError] if any statement fails.
+  /// If any statement fails, throws the [ServerError] for the first failure,
+  /// with its kind, details and [ServerError.statementIndex].
   ///
   /// Bind parameters by referencing them as `$name` in [query] and passing the
   /// values in [bindings].
@@ -275,10 +276,9 @@ class Surreal {
       {Map<String, Object?>? bindings}) async {
     final statements = await queryRaw(query, bindings: bindings);
     final results = <Object?>[];
-    for (final statement in statements) {
+    for (final (index, statement) in statements.indexed) {
       if (statement['status'] != 'OK') {
-        throw QueryStatementError(
-            statement['result']?.toString() ?? 'Query statement failed');
+        throw ServerError.fromStatement(statement, index: index);
       }
       results.add(statement['result']);
     }
