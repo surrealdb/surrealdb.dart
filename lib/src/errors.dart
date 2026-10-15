@@ -260,6 +260,11 @@ class ServerError extends ResponseError {
   /// The structured detail, when the server sent one.
   final ErrorDetail? details;
 
+  /// Whether the detail is [detailKind], or, from a server that sends no
+  /// detail, whether the error has the matching [legacyCode].
+  bool _isDetail(String detailKind, int legacyCode) =>
+      details != null ? details!.kind == detailKind : code == legacyCode;
+
   /// For a failed statement in a `query` batch, its position in the batch.
   final int? statementIndex;
 
@@ -288,7 +293,7 @@ class ValidationError extends ServerError {
       : super(kind: ErrorKind.validation);
 
   /// Whether the query could not be parsed.
-  bool get isParseError => details?.kind == 'Parse';
+  bool get isParseError => _isDetail('Parse', -32700);
 
   /// The name of the invalid parameter, when that is what failed.
   String? get parameterName => details?.kind == 'InvalidParameter'
@@ -307,7 +312,8 @@ class ConfigurationError extends ServerError {
       : super(kind: ErrorKind.configuration);
 
   /// Whether the datastore does not support live queries.
-  bool get isLiveQueryNotSupported => details?.kind == 'LiveQueryNotSupported';
+  bool get isLiveQueryNotSupported =>
+      _isDetail('LiveQueryNotSupported', -32604);
 }
 
 /// A query did not run to completion.
@@ -322,19 +328,19 @@ class QueryError extends ServerError {
 
   /// Whether the query was not executed, for example because an earlier
   /// statement in its transaction failed.
-  bool get isNotExecuted => details?.kind == 'NotExecuted';
+  bool get isNotExecuted => _isDetail('NotExecuted', -32003);
 
   /// Whether the query ran past its timeout.
-  bool get isTimedOut => details?.kind == 'TimedOut';
+  bool get isTimedOut => _isDetail('TimedOut', -32004);
 
   /// Whether the query was cancelled.
-  bool get isCancelled => details?.kind == 'Cancelled';
+  bool get isCancelled => _isDetail('Cancelled', -32005);
 
   /// Whether the transaction conflicted with another one and can be retried.
-  bool get isTransactionConflict => details?.kind == 'TransactionConflict';
+  bool get isTransactionConflict => _isDetail('TransactionConflict', -32009);
 
   /// The timeout that was exceeded, when [isTimedOut].
-  Object? get timeout => isTimedOut ? details!.fields['duration'] : null;
+  Object? get timeout => isTimedOut ? details?.fields['duration'] : null;
 }
 
 /// A value could not be serialized or deserialized.
@@ -348,7 +354,7 @@ class SerializationError extends ServerError {
       : super(kind: ErrorKind.serialization);
 
   /// Whether the failure was while deserializing.
-  bool get isDeserialization => details?.kind == 'Deserialization';
+  bool get isDeserialization => _isDetail('Deserialization', -32008);
 }
 
 /// The operation is not permitted. Every authentication failure has this
@@ -369,10 +375,11 @@ class NotAllowedError extends ServerError {
   bool get isSessionExpired => details?.has('Auth', 'SessionExpired') ?? false;
 
   /// Whether the credentials or token were rejected.
-  bool get isInvalidAuth => details?.has('Auth', 'InvalidAuth') ?? false;
+  bool get isInvalidAuth =>
+      details != null ? details!.has('Auth', 'InvalidAuth') : code == -32002;
 
   /// Whether the failure is about authentication at all.
-  bool get isAuthError => details?.kind == 'Auth';
+  bool get isAuthError => _isDetail('Auth', -32002);
 
   /// Whether scripting is disabled on the server.
   bool get isScriptingBlocked => details?.kind == 'Scripting';
