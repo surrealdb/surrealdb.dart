@@ -249,6 +249,37 @@ void main() {
       await session.close();
     });
 
+    test('liveOf will not share a query of another session', () async {
+      final session = await db.newSession();
+      final live = await db.live('person');
+      expect(() => session.liveOf(live.id), throwsA(isA<SurrealError>()));
+      expect(db.liveOf(live.id), same(live));
+      await session.close();
+    });
+
+    test('a timed out attach starts again on a new socket', () async {
+      final timed = Surreal();
+      addTearDown(timed.close);
+      await timed.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            requestTimeout: Duration(milliseconds: 300),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      final before = server.accepted;
+      server.handler = (r) => r.method == 'attach'
+          ? const FakeSilence()
+          : FakeSurrealServer.defaultReply(r);
+      await expectLater(
+          timed.newSession(), throwsA(isA<RequestTimeoutError>()));
+      await eventually(() =>
+          server.accepted == before + 1 &&
+          timed.status == ConnectionStatus.connected);
+    });
+
     test('closing the client closes its sessions', () async {
       final session = await db.newSession();
       await db.close();

@@ -33,13 +33,19 @@ final class SurrealTransaction with SurrealQueryable {
 
   var _done = false;
 
+  /// Completes, for each stream being read, when it has ended.
+  final _openStreams = <Future<void>>{};
+
   /// Whether [commit] or [cancel] has been called.
   bool get isDone => _done;
 
-  /// Commits every change made in the transaction.
+  /// Commits every change made in the transaction, once every stream from
+  /// [queryStream] that is still being read has ended.
   Future<void> commit() async {
     _checkOpen();
     _done = true;
+    // Committing ends the transaction, which would cut such a stream short.
+    await Future.wait(List.of(_openStreams));
     await _client._rpc('commit', [id], session: _session);
   }
 
@@ -63,6 +69,34 @@ final class SurrealTransaction with SurrealQueryable {
   @override
   Stream<Object?> _callStream(String method, List<Object?> params) {
     _checkOpen();
-    return _client._rpcStream(method, params, session: _session, txn: id);
+    final source =
+        _client._rpcStream(method, params, session: _session, txn: id);
+    final ended = Completer<void>();
+    void end() {
+      if (ended.isCompleted) return;
+      ended.complete();
+      _openStreams.remove(ended.future);
+    }
+
+    StreamSubscription<Object?>? subscription;
+    late final StreamController<Object?> controller;
+    controller = StreamController<Object?>(
+      onListen: () {
+        _openStreams.add(ended.future);
+        subscription = source
+            .listen(controller.add, onError: controller.addError, onDone: () {
+          end();
+          controller.close();
+        });
+      },
+      onPause: () => subscription?.pause(),
+      onResume: () => subscription?.resume(),
+      // A cancelled stream has ended once the server has stopped it.
+      onCancel: () async {
+        await subscription?.cancel();
+        end();
+      },
+    );
+    return controller.stream;
   }
 }
