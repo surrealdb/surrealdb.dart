@@ -23,6 +23,7 @@ class _FakeHttpServer {
   String importBody = '[]';
   bool exportTakesPost = true;
   final requests = <String>[];
+  final exportBodies = <Object?>[];
 
   String get url => 'http://127.0.0.1:${_server.port}/rpc';
 
@@ -44,6 +45,9 @@ class _FakeHttpServer {
         response.headers.contentType = ContentType.json;
         response.write(importBody);
       case '/export':
+        if (request.method == 'POST') {
+          exportBodies.add(const CborCodec().decode(body));
+        }
         if (request.method == 'POST' && !exportTakesPost) {
           response.statusCode = 405;
         } else {
@@ -99,6 +103,23 @@ void main() {
     final dump = await db.export(options: const ExportOptions(accesses: false));
     expect(dump, '-- export');
     expect(server.requests, isNot(contains('POST /export')));
+  });
+
+  test('versions is only sent to an export on a server before 3.0', () async {
+    const options = ExportOptions(versions: true, records: false);
+    await db.connect(server.url);
+    await db.export(options: options);
+    await db.close();
+
+    server.version = 'surrealdb-2.3.10';
+    db = Surreal();
+    await db.connect(server.url);
+    await db.export(options: options);
+
+    expect(server.exportBodies, [
+      {'records': false},
+      {'versions': true, 'records': false},
+    ]);
   });
 
   test('export falls back to GET when the version is not known', () async {

@@ -32,7 +32,9 @@ class ExportOptions {
   final ExportTables? tables;
 
   /// Whether to export every version of each record, on storage engines
-  /// that keep them.
+  /// that keep them. Only servers before 3.0 take it: 3.0 to 3.3.0 ignore
+  /// it and later versions refuse it, so it is not sent to them, nor to a
+  /// server whose version was not checked.
   final bool? versions;
 
   /// Whether to export records, or only the table definitions.

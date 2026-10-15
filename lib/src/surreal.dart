@@ -600,6 +600,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   /// over the server's HTTP `/export` endpoint. Works with either engine.
   /// [options] choose what to include. Servers before 2.1 cannot take them,
   /// so they are ignored there and everything is exported.
+  /// [ExportOptions.versions] is sent only to servers before 3.0.
   Future<String> export({ExportOptions? options}) async {
     final uri = _httpBase().replace(path: '/export');
     Future<http.Response> exportAll() =>
@@ -613,7 +614,11 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
             uri,
             headers: _httpHeaders(
                 contentType: _codec.contentType, accept: 'text/plain'),
-            body: _codec.encode(options.toJson()),
+            body: _codec.encode(options.toJson()
+              // Later servers ignore it or, from 3.3.1, refuse it.
+              ..removeWhere((key, _) =>
+                  key == 'versions' &&
+                  (version == null || version.first >= 3))),
           );
     // A server whose version was not checked may still be one that only
     // exports with GET.
