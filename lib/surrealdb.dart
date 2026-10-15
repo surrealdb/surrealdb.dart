@@ -10,7 +10,12 @@ export 'src/cbor/tags.dart' show SurrealCborTags;
 export 'src/errors.dart';
 export 'src/live_query.dart' show LiveQuery;
 export 'src/protocol/codec.dart' show SurrealCodec, SurrealFormat;
-export 'src/surreal.dart' show Surreal;
+export 'src/surreal.dart'
+    show
+        Surreal,
+        isSupportedServerVersion,
+        maximumServerVersion,
+        minimumServerVersion;
 export 'src/types/auth.dart';
 export 'src/types/connection.dart';
 export 'src/types/live.dart';

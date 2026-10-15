@@ -15,8 +15,11 @@ import 'types/live.dart';
 import 'types/patch.dart';
 import 'value/value.dart';
 
-/// The minimum SurrealDB server version this client targets.
-const String _minimumVersion = '1.4.2';
+/// The lowest SurrealDB server version this client accepts.
+const String minimumServerVersion = '1.4.2';
+
+/// The first SurrealDB server version this client no longer accepts.
+const String maximumServerVersion = '5.0.0';
 
 class _LiveRegistration {
   _LiveRegistration(this.query, this.resource, this.diff);
@@ -52,6 +55,7 @@ class Surreal {
   String? _database;
   String? _accessToken;
   String? _version;
+  var _versionCheck = true;
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
   StreamSubscription<LiveMessage>? _liveSubscription;
@@ -70,8 +74,16 @@ class Surreal {
   String? get serverVersion => _version;
 
   /// The current connection status.
-  ConnectionStatus get status =>
-      _engine?.status ?? ConnectionStatus.disconnected;
+  ConnectionStatus get status {
+    final status = _engine?.status ?? ConnectionStatus.disconnected;
+    return _verifying && status == ConnectionStatus.connected
+        ? ConnectionStatus.connecting
+        : status;
+  }
+
+  /// Whether [connect] is still checking the server, so the connection is
+  /// not yet reported as connected.
+  var _verifying = false;
 
   /// Whether there is an open connection.
   bool get isConnected => status == ConnectionStatus.connected;
@@ -98,13 +110,25 @@ class Surreal {
     final engine = _engineFor(uri, options);
     _engine = engine;
     _url = uri;
+    _versionCheck = options.versionCheck;
+    engine.onVerify = _verifyServer;
     engine.onReconnect = _restartLiveQueries;
     engine.onAuthenticationLost = (_) => _accessToken = null;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
     _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
-    await engine.open(uri, timeout: options.timeout);
-
+    // The server is checked before anyone is told the connection is open.
+    _verifying = options.versionCheck;
+    try {
+      await engine.open(uri, timeout: options.timeout);
+      if (options.versionCheck) await _checkVersion();
+    } catch (_) {
+      _verifying = false;
+      await close();
+      rethrow;
+    }
+    _verifying = false;
+    _publishStatus(engine.status);
     if (options.namespace != null || options.database != null) {
       await use(namespace: options.namespace, database: options.database);
     }
@@ -112,9 +136,6 @@ class Surreal {
       await signin(options.authentication!);
     } else if (options.token != null) {
       await authenticate(options.token!);
-    }
-    if (options.versionCheck) {
-      await _checkVersion();
     }
   }
 
@@ -170,6 +191,7 @@ class Surreal {
   }
 
   void _publishStatus(ConnectionStatus status) {
+    if (_verifying && status == ConnectionStatus.connected) return;
     if (status == _publishedStatus) return;
     _publishedStatus = status;
     _statusController.add(status);
@@ -177,12 +199,13 @@ class Surreal {
 
   /// Returns the server version string, for example `2.1.0`.
   Future<String> version() async {
-    final result = await _rpc('version');
-    final version =
-        result is Map ? result['version']?.toString() : result?.toString();
+    final version = _versionOf(await _rpc('version'));
     _version = version;
     return version ?? '';
   }
+
+  static String? _versionOf(Object? result) =>
+      result is Map ? result['version']?.toString() : result?.toString();
 
   /// Checks that the server is reachable and healthy. Throws on failure.
   Future<void> health() async {
@@ -196,14 +219,36 @@ class Surreal {
     }
   }
 
+  /// Fails with [UnsupportedVersionError] unless the server version is at
+  /// least [minimumServerVersion] and below [maximumServerVersion]. A
+  /// pre-release counts as its release, so `5.0.0-alpha` is rejected and
+  /// `3.4.0-nightly` is accepted.
   Future<void> _checkVersion() async {
     final version = await this.version();
-    final parts = version.split('.');
-    if (parts.isEmpty) return;
-    final major = int.tryParse(parts.first.replaceAll(RegExp(r'[^0-9]'), ''));
-    if (major != null && major < 1) {
-      throw UnsupportedVersionError(version, _minimumVersion);
+    if (!isSupportedServerVersion(version)) {
+      throw UnsupportedVersionError(
+          version, minimumServerVersion, maximumServerVersion);
     }
+  }
+
+  /// Runs when the WebSocket engine reconnects, before the session is
+  /// restored. The server behind the URL may have changed, so its version is
+  /// checked again. An unsupported server closes the client; any other
+  /// failure fails the attempt, which the engine tries again.
+  Future<void> _verifyServer(
+      Future<Object?> Function(String method, List<Object?> params)
+          call) async {
+    if (!_versionCheck) return;
+    final version = _versionOf(await call('version', const [])) ?? '';
+    _version = version;
+    if (isSupportedServerVersion(version)) return;
+    final error = UnsupportedVersionError(
+        version, minimumServerVersion, maximumServerVersion);
+    for (final registration in List.of(_liveByUuid.values)) {
+      registration.query.emitError(error, StackTrace.current);
+    }
+    await close();
+    throw error;
   }
 
   // ---------------------------------------------------------------------------
@@ -514,4 +559,29 @@ class Surreal {
         if (_namespace != null) 'Surreal-NS': _namespace!,
         if (_database != null) 'Surreal-DB': _database!,
       };
+}
+
+/// Whether [version], as returned by the `version` RPC (for example
+/// `surrealdb-3.3.4` or `3.4.0-nightly+20261014`), is within the range this
+/// client supports.
+bool isSupportedServerVersion(String version) {
+  final parsed = _parseVersion(version);
+  if (parsed == null) return false;
+  return _compareVersions(parsed, _parseVersion(minimumServerVersion)!) >= 0 &&
+      _compareVersions(parsed, _parseVersion(maximumServerVersion)!) < 0;
+}
+
+final RegExp _versionPattern = RegExp(r'(\d+)\.(\d+)\.(\d+)');
+
+List<int>? _parseVersion(String version) {
+  final match = _versionPattern.firstMatch(version);
+  if (match == null) return null;
+  return [for (var i = 1; i <= 3; i++) int.parse(match.group(i)!)];
+}
+
+int _compareVersions(List<int> a, List<int> b) {
+  for (var i = 0; i < 3; i++) {
+    if (a[i] != b[i]) return a[i].compareTo(b[i]);
+  }
+  return 0;
 }

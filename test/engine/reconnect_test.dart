@@ -39,7 +39,8 @@ void main() {
         () => db.status == ConnectionStatus.connected && server.accepted == 2);
 
     expect(server.openConnections, 1);
-    expect(server.methods.skip(3), ['use', 'authenticate']);
+    // The version is checked again before the session is restored.
+    expect(server.methods.skip(3), ['version', 'use', 'authenticate']);
     expect(db.accessToken, 'token');
   });
 

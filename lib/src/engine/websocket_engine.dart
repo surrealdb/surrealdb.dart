@@ -46,6 +46,9 @@ class WebSocketEngine implements Engine {
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
+  Future<void> Function(
+          Future<Object?> Function(String method, List<Object?> params) call)?
+      _onVerify;
   void Function(Object error)? _onAuthenticationLost;
 
   @override
@@ -56,6 +59,14 @@ class WebSocketEngine implements Engine {
 
   @override
   Stream<LiveMessage> get liveNotifications => _liveController.stream;
+
+  @override
+  set onVerify(
+          Future<void> Function(
+                  Future<Object?> Function(String method, List<Object?> params)
+                      call)?
+              handler) =>
+      _onVerify = handler;
 
   @override
   set onReconnect(Future<void> Function()? handler) => _onReconnect = handler;
@@ -282,8 +293,12 @@ class WebSocketEngine implements Engine {
         if (_intentionalClose) return;
         try {
           await _connect();
+          // The server behind the URL may have changed, so it is checked
+          // before anything is sent to it or anyone is told it is back.
+          await _onVerify?.call(_call);
           await _restoreSession();
         } catch (_) {
+          if (_intentionalClose) return;
           // Close whatever this attempt opened before trying again.
           await _dropChannel();
           continue;
