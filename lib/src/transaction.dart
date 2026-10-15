@@ -66,11 +66,24 @@ final class SurrealTransaction with SurrealQueryable {
     return _client._rpc(method, params, session: _session, txn: id);
   }
 
+  /// Like [SurrealQueryable.queryStream]. [commit] waits for the stream to
+  /// end, also when the query runs buffered on a server without streaming.
+  @override
+  Stream<QueryFrame> queryStream(String query,
+      {Map<String, Object?>? bindings}) {
+    _checkOpen();
+    return _tracked(super.queryStream(query, bindings: bindings));
+  }
+
   @override
   Stream<Object?> _callStream(String method, List<Object?> params) {
     _checkOpen();
-    final source =
-        _client._rpcStream(method, params, session: _session, txn: id);
+    return _client._rpcStream(method, params, session: _session, txn: id);
+  }
+
+  /// [source], tracked in [_openStreams] from when it is listened to until
+  /// it ends.
+  Stream<T> _tracked<T>(Stream<T> source) {
     final ended = Completer<void>();
     void end() {
       if (ended.isCompleted) return;
@@ -78,9 +91,9 @@ final class SurrealTransaction with SurrealQueryable {
       _openStreams.remove(ended.future);
     }
 
-    StreamSubscription<Object?>? subscription;
-    late final StreamController<Object?> controller;
-    controller = StreamController<Object?>(
+    StreamSubscription<T>? subscription;
+    late final StreamController<T> controller;
+    controller = StreamController<T>(
       onListen: () {
         _openStreams.add(ended.future);
         subscription = source
@@ -93,8 +106,11 @@ final class SurrealTransaction with SurrealQueryable {
       onResume: () => subscription?.resume(),
       // A cancelled stream has ended once the server has stopped it.
       onCancel: () async {
-        await subscription?.cancel();
-        end();
+        try {
+          await subscription?.cancel();
+        } finally {
+          end();
+        }
       },
     );
     return controller.stream;

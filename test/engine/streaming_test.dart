@@ -162,6 +162,87 @@ void main() {
     await read;
   });
 
+  test('a stream that times out ends on the server before it fails', () async {
+    final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
+    await db.connect(server.url,
+        options:
+            const ConnectOptions(requestTimeout: Duration(milliseconds: 300)));
+    var ended = false;
+    bool? committedAfterEnd;
+    server.handler = (r) {
+      switch (r.method) {
+        case 'begin':
+          return FakeResult(txn);
+        case 'query_stream':
+          return const FakeSilence();
+        case 'query_cancel':
+          Timer(const Duration(milliseconds: 150), () {
+            ended = true;
+            server.push({
+              'id': r.params.first,
+              'result': {'stream': 'end', 'results': 0, 'time': '1ms'},
+            });
+          });
+          return const FakeResult(null);
+        case 'commit':
+          committedAfterEnd = ended;
+          return const FakeResult(null);
+        default:
+          return FakeSurrealServer.defaultReply(r);
+      }
+    };
+    final transaction = await db.beginTransaction();
+    await expectLater(transaction.queryStream('q').toList(),
+        throwsA(isA<RequestTimeoutError>()));
+    await transaction.commit();
+    expect(committedAfterEnd, isTrue);
+  });
+
+  test('a refused cancel drops the socket, which stops the query', () async {
+    await connect('surrealdb-3.3.4');
+    server.handler = (r) => switch (r.method) {
+          'query_stream' => FakeResults(frames.sublist(0, 2)),
+          'query_cancel' => const FakeError('Method not allowed',
+              code: -32602, extra: {'kind': 'NotAllowed'}),
+          _ => FakeSurrealServer.defaultReply(r),
+        };
+    await db.queryStream('q').first;
+    await eventually(() => server.accepted == 2);
+  });
+
+  test('commit waits for a buffered transaction query too', () async {
+    final txn = Uuid('0192e3c4-0000-7000-8000-000000000001');
+    await connect('surrealdb-3.2.0');
+    FakeRequest? held;
+    server.handler = (r) {
+      switch (r.method) {
+        case 'begin':
+          return FakeResult(txn);
+        case 'query':
+          held = r;
+          return const FakeSilence();
+        default:
+          return FakeSurrealServer.defaultReply(r);
+      }
+    };
+    final transaction = await db.beginTransaction();
+    final read = transaction.queryStream('q').toList();
+    await eventually(() => held != null);
+    final committing = transaction.commit();
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(server.methods, isNot(contains('commit')));
+
+    held!.socket.add(const CborCodec().encode({
+      'id': held!.id,
+      'result': [
+        {'status': 'OK', 'time': '1ms', 'result': 1},
+      ],
+    }));
+    await read;
+    await committing;
+    expect(server.methods.last, 'commit');
+  });
+
   test('streaming is tried again after a reconnect', () async {
     await db.connect(server.url,
         options: const ConnectOptions(
