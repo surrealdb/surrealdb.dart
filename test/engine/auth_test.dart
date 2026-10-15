@@ -399,5 +399,91 @@ void main() {
       await secondCall;
       expect(db.tokens, Tokens(access: second, refresh: 'r-b'));
     });
+
+    test('a renewal that fails is tried again after the token expires',
+        () async {
+      var failures = 0;
+      server.handler = (r) => switch (r.method) {
+            'signin' => issueTokens(r, const Duration(seconds: 1)),
+            'refresh' when failures++ == 0 => const FakeError(
+                'There was a problem with the datastore',
+                extra: {'kind': 'Internal'}),
+            'refresh' => issueTokens(r, const Duration(hours: 1)),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await connect();
+      await db.signin(const RootAuth(username: 'u', password: 'p'));
+      await eventually(() => db.tokens?.refresh == 'refresh-2',
+          timeout: const Duration(seconds: 8));
+      expect(server.methods.where((m) => m == 'refresh'), hasLength(2));
+    }, timeout: const Timeout(Duration(seconds: 20)));
+
+    test('a session whose renewal is rejected is signed out when it expires',
+        () async {
+      server.handler = (r) => switch (r.method) {
+            'signin' => issueTokens(r, const Duration(seconds: 1)),
+            'refresh' => const FakeError('The refresh token is not valid',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      await connect();
+      await db.signin(const RootAuth(username: 'u', password: 'p'));
+      await eventually(() => server.methods.contains('refresh'));
+      await eventually(() => db.tokens == null,
+          timeout: const Duration(seconds: 3));
+    });
+
+    test('a reconnect keeps the tokens until signing in again works', () async {
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}'))
+          : FakeSurrealServer.defaultReply(r);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      var failures = 0;
+      server.handler = (r) => switch (r.method) {
+            'authenticate' => const FakeError('The token has expired',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            'signin' when failures++ == 0 => const FakeError(
+                'There was a problem with the datastore',
+                extra: {'kind': 'Internal'}),
+            'signin' =>
+              FakeResult(fakeJwt(const Duration(hours: 1), id: '${++issued}')),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 3);
+      expect(
+          server.methods, ['authenticate', 'signin', 'authenticate', 'signin']);
+      expect(db.tokens, isNotNull);
+    });
+
+    test('a timed out refresh starts again on a new socket', () async {
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            requestTimeout: Duration(milliseconds: 300),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      server.handler = (r) => r.method == 'refresh'
+          ? const FakeSilence()
+          : FakeSurrealServer.defaultReply(r);
+      await expectLater(db.refresh(const Tokens(access: 'a', refresh: 'r')),
+          throwsA(isA<RequestTimeoutError>()));
+      await eventually(() =>
+          server.accepted == 2 && db.status == ConnectionStatus.connected);
+    });
   });
 }

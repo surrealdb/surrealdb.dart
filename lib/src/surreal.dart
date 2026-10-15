@@ -127,8 +127,16 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   String? get serverVersion => _version;
 
   /// The current connection status.
-  ConnectionStatus get status =>
-      _engine?.status ?? ConnectionStatus.disconnected;
+  ConnectionStatus get status {
+    final status = _engine?.status ?? ConnectionStatus.disconnected;
+    return _verifying && status == ConnectionStatus.connected
+        ? ConnectionStatus.connecting
+        : status;
+  }
+
+  /// Whether [connect] is still checking the server, so the connection is
+  /// not yet reported as connected.
+  var _verifying = false;
 
   /// Whether there is an open connection.
   bool get isConnected => status == ConnectionStatus.connected;
@@ -165,17 +173,20 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
     _ownCodec = options.codec == null;
-    await engine.open(uri, timeout: options.timeout);
+    // Until the version is known, sets go as arrays, which every server takes.
     _adaptCodec();
-
-    if (options.versionCheck) {
-      try {
-        await _checkVersion();
-      } catch (_) {
-        await close();
-        rethrow;
-      }
+    // The server is checked before anyone is told the connection is open.
+    _verifying = options.versionCheck;
+    try {
+      await engine.open(uri, timeout: options.timeout);
+      if (options.versionCheck) await _checkVersion();
+    } catch (_) {
+      _verifying = false;
+      await close();
+      rethrow;
     }
+    _verifying = false;
+    _publishStatus(engine.status);
     if (options.namespace != null || options.database != null) {
       await use(
         namespace: options.namespace ?? _unchanged,
@@ -251,6 +262,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   void _publishStatus(ConnectionStatus status) {
+    if (_verifying && status == ConnectionStatus.connected) return;
     if (status == _publishedStatus) return;
     _publishedStatus = status;
     _statusController.add(status);
@@ -314,7 +326,13 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   Future<void> _verifyServer(
       Future<Object?> Function(String method, List<Object?> params)
           call) async {
-    if (!_versionCheck) return;
+    if (!_versionCheck) {
+      // The server may have changed, and its version is not checked, so
+      // forget the old one and send sets as arrays again.
+      _version = null;
+      _adaptCodec();
+      return;
+    }
     final version = _versionOf(await call('version', const [])) ?? '';
     _version = version;
     // The session about to be replayed may hold sets.
@@ -449,7 +467,8 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     ];
     for (final entry in registrations) {
       _liveByUuid.remove(entry.key);
-      await entry.value.query.dispose();
+      // Not awaited: a paused listener would hold up the rest.
+      unawaited(entry.value.query.dispose());
     }
   }
 
