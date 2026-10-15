@@ -548,7 +548,8 @@ class Surreal {
   /// session is signed out when the access token expires.
   void _scheduleRenewal({Duration? after}) {
     final token = _session.token;
-    if (token == null || _authCalls > 0) return;
+    // A renewal under way schedules the next once it is done.
+    if (token == null || _authCalls > 0 || _renewing != null) return;
     final expiry = tokenExpiry(token);
     if (expiry == null) return;
     _renewalTimer?.cancel();
@@ -579,8 +580,10 @@ class Surreal {
     _renewalTimer = null;
     // The tokens changed since this renewal was scheduled, or are changing.
     if (_session.token != token || _engine == null || _authCalls > 0) return;
+    if (_renewing != null) return;
     final done = Completer<void>();
     _renewing = done.future;
+    var retry = false;
     try {
       final credentials = _renewWith;
       final refreshToken = _session.refreshToken;
@@ -594,9 +597,8 @@ class Surreal {
         await _rpc('signin', [credentials]);
       }
       await _selectAgain(namespace, database);
-      // A server may give the same token back, which renews nothing and
-      // schedules nothing.
-      if (_session.token == token && _renewalTimer == null) _retryRenewal();
+      // A server may give the same token back, which renews nothing.
+      retry = _session.token == token;
     } catch (error, stackTrace) {
       if (!_authController.isClosed) {
         _authController.addError(error, stackTrace);
@@ -611,17 +613,19 @@ class Surreal {
         } else {
           _renewWith = null;
         }
-        // Signs out at expiry, unless the credentials can still renew it.
-        _scheduleRenewal();
+        // Scheduled below: signs out at expiry, unless the credentials can
+        // still renew it.
         return;
       }
       // Try again, backing off, for example once a dropped connection is
       // back. This goes on after the access token expires, as the refresh
       // token or credentials may still work.
-      _retryRenewal();
+      retry = true;
     } finally {
       _renewing = null;
       done.complete();
+      // Only now that this renewal is done, so that none overlaps it.
+      if (_renewalTimer == null) retry ? _retryRenewal() : _scheduleRenewal();
     }
   }
 
