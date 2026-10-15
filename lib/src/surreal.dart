@@ -43,7 +43,9 @@ class _LiveRegistration {
 class Surreal {
   Engine? _engine;
   Uri? _url;
-  final http.Client _httpClient = http.Client();
+  http.Client? _httpClient;
+  StreamSubscription<ConnectionStatus>? _statusSubscription;
+  final _statusController = StreamController<ConnectionStatus>.broadcast();
 
   String? _namespace;
   String? _database;
@@ -73,9 +75,10 @@ class Surreal {
   /// Whether there is an open connection.
   bool get isConnected => status == ConnectionStatus.connected;
 
-  /// Emits whenever the connection status changes.
-  Stream<ConnectionStatus> get statusChanges =>
-      _engine?.statusChanges ?? const Stream.empty();
+  /// Emits whenever the connection status changes. The stream outlives any
+  /// single connection, so a listener keeps receiving updates across [close]
+  /// and a later [connect].
+  Stream<ConnectionStatus> get statusChanges => _statusController.stream;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -83,14 +86,20 @@ class Surreal {
 
   /// Connects to the server at [url]. The scheme selects the engine: `ws` and
   /// `wss` use the WebSocket engine, `http` and `https` use the HTTP engine.
+  ///
+  /// Calling [connect] on a client that is already connected closes the
+  /// existing connection first. A client can be connected again after [close].
   Future<void> connect(String url,
       {ConnectOptions options = const ConnectOptions()}) async {
+    if (_engine != null) await close();
     final uri = Uri.parse(url);
+    _httpClient = http.Client();
     final engine = _engineFor(uri, options);
     _engine = engine;
     _url = uri;
     engine.onReconnect = _restartLiveQueries;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
+    _statusSubscription = engine.statusChanges.listen(_statusController.add);
 
     await engine.open(uri, timeout: options.timeout);
 
@@ -115,24 +124,34 @@ class Surreal {
         return WebSocketEngine(codec, reconnect: options.reconnect);
       case 'http':
       case 'https':
-        return HttpEngine(codec, client: _httpClient);
+        return HttpEngine(codec, client: _httpClient!);
       default:
         throw UnsupportedEngineError(uri.scheme);
     }
   }
 
   /// Closes the connection and releases resources. Active live queries are
-  /// closed.
+  /// closed. The client can be connected again with [connect].
   Future<void> close() async {
     await _liveSubscription?.cancel();
     _liveSubscription = null;
-    for (final reg in _liveByUuid.values) {
+    final registrations = List.of(_liveByUuid.values);
+    _liveByUuid.clear();
+    for (final reg in registrations) {
       await reg.query.dispose();
     }
-    _liveByUuid.clear();
-    await _engine?.close();
-    _httpClient.close();
+    final engine = _engine;
     _engine = null;
+    await engine?.close();
+    await _statusSubscription?.cancel();
+    _statusSubscription = null;
+    if (engine != null) _statusController.add(ConnectionStatus.disconnected);
+    _httpClient?.close();
+    _httpClient = null;
+    _namespace = null;
+    _database = null;
+    _accessToken = null;
+    _version = null;
   }
 
   /// Returns the server version string, for example `2.1.0`.
@@ -147,7 +166,7 @@ class Surreal {
   /// Checks that the server is reachable and healthy. Throws on failure.
   Future<void> health() async {
     final base = _httpBase();
-    final response = await _httpClient.get(base.replace(path: '/health'));
+    final response = await _http.get(base.replace(path: '/health'));
     if (response.statusCode != 200) {
       throw HttpConnectionError(
         'Health check failed with status ${response.statusCode}',
@@ -366,7 +385,7 @@ class Surreal {
 
   /// Imports a SurrealQL document into the current namespace and database.
   Future<void> import(String surql) async {
-    final response = await _httpClient.post(
+    final response = await _http.post(
       _httpBase().replace(path: '/import'),
       headers: _httpHeaders(contentType: 'text/plain'),
       body: surql,
@@ -381,7 +400,7 @@ class Surreal {
 
   /// Exports the current namespace and database as a SurrealQL document.
   Future<String> export() async {
-    final response = await _httpClient.get(
+    final response = await _http.get(
       _httpBase().replace(path: '/export'),
       headers: _httpHeaders(accept: 'text/plain'),
     );
@@ -397,6 +416,12 @@ class Surreal {
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  http.Client get _http {
+    final client = _httpClient;
+    if (client == null) throw const ConnectionUnavailableError();
+    return client;
+  }
 
   Future<Object?> _rpc(String method, [List<Object?> params = const []]) {
     final engine = _engine;
