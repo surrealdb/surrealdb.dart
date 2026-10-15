@@ -335,6 +335,18 @@ void main() {
     expect(ended, isTrue);
   });
 
+  test('a stream whose request cannot be sent fails', () async {
+    await connect('surrealdb-3.3.4');
+    await expectLater(
+        db
+            .queryStream('q', bindings: {'x': Object()})
+            .toList()
+            .timeout(const Duration(seconds: 2)),
+        throwsA(isNot(isA<TimeoutException>())));
+    expect(server.methods, isNot(contains('query_stream')));
+    expect((await db.query('RETURN 1')), isNotNull);
+  });
+
   test('streaming is tried again after a reconnect', () async {
     await db.connect(server.url,
         options: const ConnectOptions(
