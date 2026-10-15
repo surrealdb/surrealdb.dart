@@ -605,3 +605,21 @@ class UnsuccessfulApiError extends SurrealError {
   /// The body the API returned.
   final Object? body;
 }
+
+/// Thrown by `import` when some statements of the document failed. The
+/// statements that did not fail have been applied.
+class ImportError extends SurrealError {
+  ImportError(this.failures)
+      : super('${failures.length} statement'
+            '${failures.length == 1 ? '' : 's'} failed to import: '
+            '${failures.first.message}');
+
+  /// The error of each failed statement, in document order. Servers from
+  /// 3.0 report only the failed statements, so there
+  /// [ServerError.statementIndex] is the position among the failures; older
+  /// servers report every statement, so it is the position in the document.
+  final List<ServerError> failures;
+
+  /// How many statements failed.
+  int get failed => failures.length;
+}

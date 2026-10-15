@@ -11,9 +11,11 @@ import 'engine/websocket_engine.dart';
 import 'errors.dart';
 import 'internal/jwt.dart';
 import 'live_query.dart';
+import 'protocol/codec.dart';
 import 'protocol/codecs.dart';
 import 'types/auth.dart';
 import 'types/connection.dart';
+import 'types/export.dart';
 import 'types/live.dart';
 import 'types/patch.dart';
 import 'types/query_frame.dart';
@@ -73,6 +75,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   late final SessionState _session = SessionState()
     ..onTokensChanged = _onTokensChanged;
   String? _version;
+  SurrealCodec _codec = const CborCodec();
   var _versionCheck = true;
 
   /// Whether the codec is the built-in one for the format, rather than one
@@ -205,7 +208,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   }
 
   Engine _engineFor(Uri uri, ConnectOptions options) {
-    final codec = options.codec ?? codecForFormat(options.format);
+    final codec = _codec = options.codec ?? codecForFormat(options.format);
     switch (uri.scheme) {
       case 'ws':
       case 'wss':
@@ -560,30 +563,111 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   // Import and export
   // ---------------------------------------------------------------------------
 
-  /// Imports a SurrealQL document into the current namespace and database.
+  /// Imports a SurrealQL document, such as one from [export], into the
+  /// current namespace and database, over the server's HTTP `/import`
+  /// endpoint. Works with either engine.
+  ///
+  /// The document must start with `OPTION IMPORT;`, as exports do. The
+  /// import is not atomic: statements run one by one, and those that fail do
+  /// not stop the rest. When any fail, this throws an [ImportError] listing
+  /// them, after the others have been applied. If the server's reply does
+  /// not say how the statements went, this throws a [ResponseError] rather
+  /// than report an import it could not check as complete.
   Future<void> import(String surql) async {
     final response = await _http.post(
       _httpBase().replace(path: '/import'),
-      headers: _httpHeaders(contentType: 'text/plain'),
+      headers:
+          _httpHeaders(contentType: 'text/plain', accept: _codec.contentType),
       body: surql,
     );
+    final failures = _importFailures(response.bodyBytes);
+    if (failures != null && failures.isNotEmpty) {
+      throw ImportError(failures);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
-        'Import failed with status ${response.statusCode}',
+        'Import failed with status ${response.statusCode}'
+        '${_problem(response.bodyBytes)}',
         statusCode: response.statusCode,
       );
     }
+    if (failures == null) {
+      throw const ResponseError(
+          'The server did not report how the imported statements went, so '
+          'the import could not be checked');
+    }
   }
 
-  /// Exports the current namespace and database as a SurrealQL document.
-  Future<String> export() async {
-    final response = await _http.get(
-      _httpBase().replace(path: '/export'),
-      headers: _httpHeaders(accept: 'text/plain'),
-    );
+  /// The failed statements in an `/import` response, or null when the body
+  /// is not a list of statement results.
+  List<ServerError>? _importFailures(List<int> body) {
+    if (body.isEmpty) return null;
+    Object? decoded;
+    try {
+      decoded = _codec.decode(body);
+    } catch (_) {
+      // A server may answer in JSON whatever was asked for.
+      try {
+        decoded = jsonDecode(utf8.decode(body));
+      } catch (_) {
+        return null;
+      }
+    }
+    if (decoded is! List) return null;
+    return [
+      for (final (index, statement) in decoded.indexed)
+        if (statement is Map && statement['status'] == 'ERR')
+          ServerError.fromStatement(statement, index: index),
+    ];
+  }
+
+  /// The explanation in an HTTP error body, as `: <text>`, if there is one.
+  String _problem(List<int> body) {
+    try {
+      final decoded = jsonDecode(utf8.decode(body));
+      if (decoded is Map && decoded['information'] is String) {
+        return ': ${decoded['information']}';
+      }
+    } catch (_) {
+      // Not a JSON problem document.
+    }
+    return '';
+  }
+
+  /// Exports the current namespace and database as a SurrealQL document,
+  /// over the server's HTTP `/export` endpoint. Works with either engine.
+  /// [options] choose what to include. Servers before 2.1 cannot take them,
+  /// so they are ignored there and everything is exported.
+  /// [ExportOptions.versions] is sent only to servers before 3.0.
+  Future<String> export({ExportOptions? options}) async {
+    final uri = _httpBase().replace(path: '/export');
+    Future<http.Response> exportAll() =>
+        _http.get(uri, headers: _httpHeaders(accept: 'text/plain'));
+    final version = _parseVersion(_version ?? '');
+    final takesOptions =
+        version == null || _compareVersions(version, const [2, 1, 0]) >= 0;
+    var response = options == null || !takesOptions
+        ? await exportAll()
+        : await _http.post(
+            uri,
+            headers: _httpHeaders(
+                contentType: _codec.contentType, accept: 'text/plain'),
+            body: _codec.encode(options.toJson()
+              // Later servers ignore it or, from 3.3.1, refuse it.
+              ..removeWhere((key, _) =>
+                  key == 'versions' &&
+                  (version == null || version.first >= 3))),
+          );
+    // A server whose version was not checked may still be one that only
+    // exports with GET. From a server known to take options, a 405 is a
+    // failure: exporting everything instead would ignore them.
+    if (response.statusCode == 405 && options != null && version == null) {
+      response = await exportAll();
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
-        'Export failed with status ${response.statusCode}',
+        'Export failed with status ${response.statusCode}'
+        '${_problem(response.bodyBytes)}',
         statusCode: response.statusCode,
       );
     }

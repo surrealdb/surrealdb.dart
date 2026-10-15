@@ -221,6 +221,25 @@ A failed statement in a `query` batch is thrown the same way, with
 `statementIndex` set to its position. Use `queryRaw` to get every statement's
 status without throwing.
 
+### Import and export
+
+`export` returns the database as SurrealQL. Pass `ExportOptions` to choose
+what it includes, and `import` loads such a document back. A document must
+start with `OPTION IMPORT;`, as an export does. If any statement fails,
+`import` throws an `ImportError` with the error of each failed statement.
+
+```dart
+final dump = await db.export(
+  options: ExportOptions(tables: ExportTables.only(['person']), users: false),
+);
+
+try {
+  await db.import(dump);
+} on ImportError catch (error) {
+  for (final failure in error.failures) print(failure.message);
+}
+```
+
 ### Serialization format
 
 The driver speaks CBOR by default, which carries the SurrealDB types without

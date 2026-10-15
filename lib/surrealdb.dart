@@ -24,6 +24,7 @@ export 'src/surreal.dart'
         minimumServerVersion;
 export 'src/types/auth.dart';
 export 'src/types/connection.dart';
+export 'src/types/export.dart';
 export 'src/types/live.dart';
 export 'src/types/patch.dart';
 export 'src/types/query_frame.dart';
