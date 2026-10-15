@@ -258,7 +258,18 @@ class WebSocketEngine implements Engine {
         }
         if (_intentionalClose) return;
         _setStatus(ConnectionStatus.connected);
-        await _onReconnect?.call();
+        try {
+          await _onReconnect?.call();
+        } catch (_) {
+          // The hook reports its own failures, such as a live query that
+          // could not be restarted. The connection itself is restored.
+        }
+        // A drop while the hook ran was not handled, because this loop was
+        // still running, so try again.
+        if (_channel == null && !_intentionalClose) {
+          _setStatus(ConnectionStatus.reconnecting);
+          continue;
+        }
         return;
       }
       if (!_intentionalClose) _setStatus(ConnectionStatus.disconnected);
