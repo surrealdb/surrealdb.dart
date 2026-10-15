@@ -69,6 +69,29 @@ void main() {
       await db.close();
     });
 
+    test('a reconnect to an unsupported server closes the client', () async {
+      server.handler = versionIs('surrealdb-3.3.4');
+      final db = Surreal();
+      await db.connect(server.url,
+          options: const ConnectOptions(
+              reconnect: ReconnectOptions(
+            retryDelay: Duration(milliseconds: 10),
+            retryDelayMax: Duration(milliseconds: 10),
+          )));
+      final live = await db.live('person');
+      final error = live.stream
+          .drain<void>()
+          .then<Object?>((_) => null, onError: (Object e) => e);
+
+      server.handler = versionIs('surrealdb-5.0.0');
+      await server.dropAll();
+      expect(await error.timeout(const Duration(seconds: 5)),
+          isA<UnsupportedVersionError>());
+      await eventually(() => db.status == ConnectionStatus.disconnected);
+      await eventually(() => server.openConnections == 0);
+      expect(server.methods.where((m) => m == 'live'), hasLength(1));
+    });
+
     test('can be turned off', () async {
       server.handler = versionIs('surrealdb-5.0.0');
       final db = Surreal();
