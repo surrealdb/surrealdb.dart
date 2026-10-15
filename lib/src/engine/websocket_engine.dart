@@ -324,6 +324,9 @@ class WebSocketEngine implements Engine {
     }
     if (!known && (namespace is String || database is String)) {
       await _useKeeping(namespace, database);
+    } else if (namespace == null && token != null) {
+      // Cleared, but authenticating may have selected them again.
+      await _call('use', [null, null]);
     }
   }
 

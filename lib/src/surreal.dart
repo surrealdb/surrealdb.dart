@@ -200,7 +200,7 @@ class Surreal {
       if (engine != null) _publishStatus(ConnectionStatus.disconnected);
       _httpClient?.close();
       _httpClient = null;
-      _session.clear();
+      _session.clear(cleared: false);
       _version = null;
     }
   }

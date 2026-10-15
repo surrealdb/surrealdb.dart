@@ -93,12 +93,14 @@ class SessionState {
     }
   }
 
-  /// Forgets everything, as the server does on `reset`.
-  void clear() {
+  /// Forgets everything, as the server does on `reset`. Unless [cleared], the
+  /// namespace and database become unknown, as for a new connection, rather
+  /// than cleared.
+  void clear({bool cleared = true}) {
     namespace = null;
     database = null;
-    namespaceCleared = true;
-    databaseCleared = true;
+    namespaceCleared = cleared;
+    databaseCleared = cleared;
     token = null;
     variables.clear();
   }
