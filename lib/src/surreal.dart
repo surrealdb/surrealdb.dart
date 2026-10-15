@@ -535,15 +535,31 @@ class Surreal {
 
   /// Renews the session [_tokenExpiryMargin] before its access token
   /// expires: with the refresh token when there is one, otherwise by signing
-  /// in again with the credentials given to [connect].
+  /// in again with the credentials given to [connect]. With neither, the
+  /// session is signed out when the access token expires.
   void _scheduleRenewal({Duration? after}) {
     final token = _session.token;
     if (!_renewTokens || token == null || _authCalls > 0) return;
-    if (_session.refreshToken == null && _renewWith == null) return;
     final expiry = tokenExpiry(token);
     if (expiry == null) return;
+    _renewalTimer?.cancel();
+    if (_session.refreshToken == null && _renewWith == null) {
+      _renewalTimer = Timer(_untilExpiry(expiry), () {
+        _renewalTimer = null;
+        if (_session.token == token) _session.setTokens(null, null);
+      });
+      return;
+    }
     final delay = after ?? renewalDelay(expiry, _tokenExpiryMargin);
     _renewalTimer = Timer(delay, () => _renew(token, expiry));
+  }
+
+  /// Schedules the next attempt at a renewal that did not happen, backing
+  /// off.
+  void _retryRenewal() {
+    final delay = Duration(seconds: 5 << _renewalFailures.clamp(0, 4));
+    _renewalFailures++;
+    _scheduleRenewal(after: delay);
   }
 
   Future<void> _renew(String token, DateTime expiry) async {
@@ -562,6 +578,9 @@ class Surreal {
       } else if (credentials != null) {
         await _rpc('signin', [credentials.toJson()]);
       }
+      // A server may give the same token back, which renews nothing and
+      // schedules nothing.
+      if (_session.token == token && _renewalTimer == null) _retryRenewal();
     } catch (error, stackTrace) {
       if (!_authController.isClosed) {
         _authController.addError(error, stackTrace);
@@ -576,20 +595,14 @@ class Surreal {
         } else {
           _renewWith = null;
         }
-        if (_session.token == token && _renewWith == null) {
-          _renewalTimer?.cancel();
-          _renewalTimer = Timer(_untilExpiry(expiry), () {
-            if (_session.token == token) _session.setTokens(null, null);
-          });
-        }
+        // Signs out at expiry, unless the credentials can still renew it.
+        _scheduleRenewal();
         return;
       }
       // Try again, backing off, for example once a dropped connection is
       // back. This goes on after the access token expires, as the refresh
       // token or credentials may still work.
-      final delay = Duration(seconds: 5 << _renewalFailures.clamp(0, 4));
-      _renewalFailures++;
-      _scheduleRenewal(after: delay);
+      _retryRenewal();
     } finally {
       _renewing = null;
       done.complete();
