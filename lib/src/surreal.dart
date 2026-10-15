@@ -409,7 +409,14 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
           );
         }
       } catch (_) {
-        await session.close();
+        try {
+          await session.close();
+        } catch (_) {
+          // Detach was refused too. Nothing else holds the session, so it
+          // is no longer tracked: it is not attached again after a
+          // reconnect, and goes when the connection closes.
+          await session._forget();
+        }
         rethrow;
       }
     }

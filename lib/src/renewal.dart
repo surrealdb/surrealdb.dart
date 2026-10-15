@@ -92,12 +92,14 @@ final class _TokenRenewal {
 
   void _schedule({Duration? after}) {
     final token = _state.token;
-    if (_stopped || !_client._renewTokens || token == null) return;
-    if (_authCalls > 0) return;
+    if (_stopped || token == null || _authCalls > 0) return;
     final expiry = tokenExpiry(token);
     if (expiry == null) return;
     _timer?.cancel();
-    if (_state.refreshToken == null && credentials == null) {
+    final renewing = _client._renewTokens;
+    // A refresh token can still be used once the access token has expired,
+    // for example by a reconnect, even with renewal off.
+    if (_state.refreshToken == null && (!renewing || credentials == null)) {
       final left = expiry.difference(DateTime.now().toUtc());
       _timer = Timer(left.isNegative ? Duration.zero : left, () {
         _timer = null;
@@ -105,6 +107,7 @@ final class _TokenRenewal {
       });
       return;
     }
+    if (!renewing) return;
     final delay = after ?? renewalDelay(expiry, _client._tokenExpiryMargin);
     _timer = Timer(delay, () => _renew(token, expiry));
   }
@@ -118,6 +121,7 @@ final class _TokenRenewal {
     }
     final session =
         _sessionId == null ? _client : _client._attached[_sessionId];
+    final engine = _client._engine;
     try {
       await session?._use(
         namespace is SurrealNone ? _unchanged : namespace as String?,
@@ -128,8 +132,11 @@ final class _TokenRenewal {
       // it reports.
     } on SurrealError {
       // The connection is down, or was dropped because the call timed out.
-      // Keep the selection wanted, which the reconnect then makes.
-      _state.applyUse([namespace, database]);
+      // Keep the selection wanted, which the reconnect then makes, unless
+      // the session or client was closed meanwhile.
+      if (!_stopped && identical(_client._engine, engine)) {
+        _state.applyUse([namespace, database]);
+      }
     }
   }
 
