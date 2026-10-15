@@ -15,7 +15,12 @@ import 'tags.dart';
 /// matching [SurrealValue]. This is the default codec, since CBOR carries the
 /// SurrealDB types without loss.
 class CborCodec implements SurrealCodec {
-  const CborCodec();
+  const CborCodec({this.setsAsArrays = false});
+
+  /// Whether Dart sets are encoded as plain arrays rather than as SurrealDB
+  /// sets. Servers before 3.0 have no set type and reject the set tag, so
+  /// the client turns this on when it connects to one.
+  final bool setsAsArrays;
 
   @override
   String get name => 'cbor';
@@ -66,6 +71,8 @@ class CborCodec implements SurrealCodec {
           for (final entry in value.entries)
             _toCbor(entry.key): _toCbor(entry.value),
         });
+      case Set() when setsAsArrays:
+        return CborList([for (final item in value) _toCbor(item)]);
       case Set():
         return CborList(
           [for (final item in value) _toCbor(item)],

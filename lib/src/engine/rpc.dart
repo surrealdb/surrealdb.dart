@@ -36,7 +36,9 @@ final class RpcNotification extends RpcIncoming {
 class RpcProtocol {
   RpcProtocol(this.codec);
 
-  final SurrealCodec codec;
+  /// The codec requests and replies are encoded with. It can be replaced by
+  /// one of the same format once the server version is known.
+  SurrealCodec codec;
   var _counter = 0;
 
   /// A fresh request id.
