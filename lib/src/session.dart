@@ -9,6 +9,7 @@ const String _unchanged = '\u0000unchanged';
 /// client, which is the connection's default session, and every
 /// [SurrealSession].
 mixin SurrealSessionMethods on SurrealQueryable {
+  @override
   Surreal get _client;
 
   /// The id of the attached session, or null for the default session.
@@ -22,6 +23,10 @@ mixin SurrealSessionMethods on SurrealQueryable {
   @override
   Future<Object?> _call(String method, [List<Object?> params = const []]) =>
       _client._rpc(method, params, session: _sessionId);
+
+  @override
+  Stream<Object?> _callStream(String method, List<Object?> params) =>
+      _client._rpcStream(method, params, session: _sessionId);
 
   /// The namespace currently selected, if any.
   String? get namespace => _state.namespace;
@@ -271,6 +276,12 @@ final class SurrealSession with SurrealQueryable, SurrealSessionMethods {
   Future<Object?> _call(String method, [List<Object?> params = const []]) {
     if (_closed) throw InvalidSessionError(id);
     return super._call(method, params);
+  }
+
+  @override
+  Stream<Object?> _callStream(String method, List<Object?> params) {
+    if (_closed) throw InvalidSessionError(id);
+    return super._callStream(method, params);
   }
 
   /// Detaches the session from the server, which stops its live queries and

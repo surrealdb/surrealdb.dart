@@ -36,6 +36,12 @@ class FakeError extends FakeReply {
   final Map<String, Object?> extra;
 }
 
+/// Reply with several results to the same request, as a streamed reply does.
+class FakeResults extends FakeReply {
+  const FakeResults(this.results);
+  final List<Object?> results;
+}
+
 /// Send nothing, so the request never completes.
 class FakeSilence extends FakeReply {
   const FakeSilence();
@@ -116,6 +122,10 @@ class FakeSurrealServer {
             'id': req.id,
             'error': {'code': code, 'message': message, ...extra},
           });
+        case FakeResults(:final results):
+          for (final result in results) {
+            _send(socket, {'id': req.id, 'result': result});
+          }
         case FakeSilence():
           break;
       }

@@ -33,6 +33,7 @@ class WebSocketEngine implements Engine {
   final ReconnectOptions _reconnect;
   final Duration? _requestTimeout;
   final _pending = <String, Completer<Object?>>{};
+  final _streams = <String, StreamController<Object?>>{};
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _liveController = StreamController<LiveMessage>.broadcast();
 
@@ -69,6 +70,9 @@ class WebSocketEngine implements Engine {
 
   @override
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
+
+  @override
+  bool get supportsStreaming => true;
 
   @override
   bool get supportsLiveQueries => true;
@@ -161,6 +165,40 @@ class WebSocketEngine implements Engine {
     return _call(method, params, session: session, txn: txn);
   }
 
+  @override
+  Stream<Object?> rpcStream(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) {
+    String? id;
+    late final StreamController<Object?> controller;
+    controller = StreamController<Object?>(
+      onListen: () {
+        final channel = _channel;
+        if (channel == null || _status != ConnectionStatus.connected) {
+          controller
+            ..addError(const ConnectionUnavailableError())
+            ..close();
+          return;
+        }
+        final requestId = id = _protocol.nextId();
+        _streams[requestId] = controller;
+        final payload = _protocol.encodeRequest(requestId, method, params,
+            session: session, txn: txn);
+        channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+      },
+      onCancel: () {
+        // Cancelled before the end, so stop the work on the server too.
+        final requestId = id;
+        if (requestId != null &&
+            _streams.remove(requestId) != null &&
+            _channel != null) {
+          unawaited(_call('query_cancel', [requestId], session: session)
+              .then((_) {}, onError: (_) {}));
+        }
+      },
+    );
+    return controller.stream;
+  }
+
   /// Sends a request on the current socket. Unlike [rpc] this does not need
   /// the connection to be fully restored, so it is used to replay the session.
   Future<Object?> _call(String method, List<Object?> params,
@@ -200,6 +238,21 @@ class WebSocketEngine implements Engine {
           completer.completeError(error);
         } else {
           completer.complete(result);
+        }
+      case RpcResponse(:final id, :final result, :final error)
+          when _streams.containsKey(id):
+        final controller = _streams[id]!;
+        if (error != null) {
+          _streams.remove(id);
+          controller
+            ..addError(error)
+            ..close();
+        } else {
+          controller.add(result);
+          if (result is Map && result['stream'] == 'end') {
+            _streams.remove(id);
+            controller.close();
+          }
         }
       case RpcNotification(:final message):
         if (!_liveController.isClosed) _liveController.add(message);
@@ -299,6 +352,13 @@ class WebSocketEngine implements Engine {
   }
 
   void _failPending(Object error) {
+    final streams = List.of(_streams.values);
+    _streams.clear();
+    for (final controller in streams) {
+      controller
+        ..addError(error)
+        ..close();
+    }
     final pending = List.of(_pending.values);
     _pending.clear();
     for (final completer in pending) {

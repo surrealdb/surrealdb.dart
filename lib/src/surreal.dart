@@ -15,6 +15,7 @@ import 'types/auth.dart';
 import 'types/connection.dart';
 import 'types/live.dart';
 import 'types/patch.dart';
+import 'types/query_frame.dart';
 import 'value/value.dart';
 
 part 'queryable.dart';
@@ -84,6 +85,19 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
 
   @override
   Surreal get _client => this;
+
+  /// Set once the server has refused `query_stream`.
+  var _streamingUnsupported = false;
+
+  /// Whether `queryStream` can stream: over WebSocket, against SurrealDB 3.3
+  /// or later. An unknown version is tried, and remembered if refused.
+  bool get _canStream {
+    final engine = _engine;
+    if (engine == null || !engine.supportsStreaming) return false;
+    if (_streamingUnsupported) return false;
+    final version = _version == null ? null : _parseVersion(_version!);
+    return version == null || _compareVersions(version, const [3, 3, 0]) >= 0;
+  }
 
   @override
   Uuid? get _sessionId => null;
@@ -217,6 +231,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     _renewalTimer = null;
     _session.clear();
     _version = null;
+    _streamingUnsupported = false;
   }
 
   /// Returns the server version string, for example `2.1.0`.
@@ -479,6 +494,13 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     if (engine == null) throw const ConnectionUnavailableError();
     final result = await engine.rpc(method, params, session: session, txn: txn);
     return result is SurrealNone ? null : result;
+  }
+
+  Stream<Object?> _rpcStream(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) {
+    final engine = _engine;
+    if (engine == null) throw const ConnectionUnavailableError();
+    return engine.rpcStream(method, params, session: session, txn: txn);
   }
 
   Uri _httpBase() {

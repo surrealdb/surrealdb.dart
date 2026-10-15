@@ -24,6 +24,7 @@ part of 'surreal.dart';
 final class SurrealTransaction with SurrealQueryable {
   SurrealTransaction._(this._client, this._session, this.id);
 
+  @override
   final Surreal _client;
   final Uuid? _session;
 
@@ -57,5 +58,11 @@ final class SurrealTransaction with SurrealQueryable {
   Future<Object?> _call(String method, [List<Object?> params = const []]) {
     _checkOpen();
     return _client._rpc(method, params, session: _session, txn: id);
+  }
+
+  @override
+  Stream<Object?> _callStream(String method, List<Object?> params) {
+    _checkOpen();
+    return _client._rpcStream(method, params, session: _session, txn: id);
   }
 }
