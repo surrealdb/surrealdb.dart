@@ -437,22 +437,25 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
 
   /// Runs when a reconnect finds a session's tokens rejected. With token
   /// renewal on, signs the session in again with its credentials, if it has
-  /// any; otherwise it carries on without authentication.
-  Future<void> _signInAgain(
+  /// any, and returns whether it did; otherwise it carries on without
+  /// authentication.
+  Future<bool> _signInAgain(
       Uuid? session,
       Object error,
       Future<Object?> Function(String method, List<Object?> params)
           call) async {
     final renewal = session == null ? _renewal : _attached[session]?._renewal;
     final credentials = renewal?.credentials;
-    if (!_renewTokens || renewal == null || credentials == null) return;
+    if (!_renewTokens || renewal == null || credentials == null) return false;
     try {
       await call('signin', [credentials]);
+      return true;
     } on ResponseError catch (error) {
       // Credentials that no longer work stay rejected; anything else fails
       // the attempt, which is tried again.
       if (!rejectsAuthentication(error)) rethrow;
       renewal.credentials = null;
+      return false;
     }
   }
 

@@ -85,7 +85,7 @@ class HttpEngine implements Engine {
 
   @override
   set onAuthenticationLost(
-      Future<void> Function(
+      Future<bool> Function(
               Uuid? session,
               Object error,
               Future<Object?> Function(String method, List<Object?> params)
@@ -140,8 +140,15 @@ class HttpEngine implements Engine {
         throw const UnsupportedFeatureError('transactions');
       // Each HTTP request is its own server-side session, so session state is
       // kept here and sent with every request instead.
-      case 'use':
       case 'authenticate':
+        // Checked with the server, as over WebSocket, so that a token it
+        // rejects fails here rather than every call after.
+        if (params.isNotEmpty && params[0] != null) {
+          await _send(method, params);
+        }
+        _session.apply(method, params, null);
+        return null;
+      case 'use':
       case 'invalidate':
       case 'let':
         // Kept as it encodes now, so later changes to the caller's objects

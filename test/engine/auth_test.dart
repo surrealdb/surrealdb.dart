@@ -373,6 +373,35 @@ void main() {
       expect(db.tokens, isNot(before));
     });
 
+    test('signing in again that gives the same token back keeps it', () async {
+      final token = fakeJwt(const Duration(hours: 1));
+      server.handler = (r) => r.method == 'signin'
+          ? FakeResult(token)
+          : FakeSurrealServer.defaultReply(r);
+      await db.connect(server.url,
+          options: const ConnectOptions(
+            versionCheck: false,
+            authentication: RootAuth(username: 'u', password: 'p'),
+            reconnect: ReconnectOptions(
+              retryDelay: Duration(milliseconds: 10),
+              retryDelayMax: Duration(milliseconds: 10),
+            ),
+          ));
+      server.handler = (r) => switch (r.method) {
+            'authenticate' => const FakeError('The token has expired',
+                code: -32002, extra: {'kind': 'NotAllowed'}),
+            'signin' => FakeResult(token),
+            _ => FakeSurrealServer.defaultReply(r),
+          };
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(server.methods, ['authenticate', 'signin']);
+      expect(db.tokens?.access, token);
+    });
+
     test('a failed sign-in keeps renewing the session it left alone', () async {
       server.handler = (r) => r.method == 'signin'
           ? FakeResult(fakeJwt(const Duration(seconds: 2), id: '${++issued}'))
