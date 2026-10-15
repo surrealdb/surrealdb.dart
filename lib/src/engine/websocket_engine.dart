@@ -186,7 +186,7 @@ class WebSocketEngine implements Engine {
         final key = params[0] as String;
         // `let` without a value removes the variable, as on the server.
         if (params.length > 1) {
-          _variables[key] = params[1];
+          _variables[key] = snapshotValue(params[1]);
         } else {
           _variables.remove(key);
         }
@@ -258,7 +258,18 @@ class WebSocketEngine implements Engine {
         }
         if (_intentionalClose) return;
         _setStatus(ConnectionStatus.connected);
-        await _onReconnect?.call();
+        try {
+          await _onReconnect?.call();
+        } catch (_) {
+          // The hook reports its own failures, such as a live query that
+          // could not be restarted. The connection itself is restored.
+        }
+        // A drop while the hook ran was not handled, because this loop was
+        // still running, so try again.
+        if (_channel == null && !_intentionalClose) {
+          _setStatus(ConnectionStatus.reconnecting);
+          continue;
+        }
         return;
       }
       if (!_intentionalClose) _setStatus(ConnectionStatus.disconnected);
