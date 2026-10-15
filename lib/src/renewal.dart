@@ -17,6 +17,9 @@ final class _TokenRenewal {
   AnyAuth? credentials;
 
   Timer? _timer;
+
+  /// How many renewals in a row have failed, for backing off.
+  var _failures = 0;
   Future<void>? _renewing;
   var _stopped = false;
 
@@ -66,6 +69,7 @@ final class _TokenRenewal {
   void reschedule() {
     _timer?.cancel();
     _timer = null;
+    _failures = 0;
     _schedule();
   }
 
@@ -120,15 +124,28 @@ final class _TokenRenewal {
       if (_state.token != token) return;
       if (error is NotAllowedError) {
         // The refresh token or credentials were rejected, so retrying will
-        // not help. The session keeps its access token until it expires.
-        _state.setTokens(token, null);
+        // not help. The session keeps its access token until it expires,
+        // and is signed out then.
+        if (_state.refreshToken != null) {
+          _state.setTokens(token, null);
+        } else {
+          credentials = null;
+        }
+        if (_state.token == token && credentials == null) {
+          _timer?.cancel();
+          final left = expiry.difference(DateTime.now().toUtc());
+          _timer = Timer(left.isNegative ? Duration.zero : left, () {
+            if (_state.token == token) _state.setTokens(null, null);
+          });
+        }
         return;
       }
-      // Try again shortly while the token is still valid, for example once
-      // a dropped connection is back.
-      if (expiry.isAfter(DateTime.now().toUtc())) {
-        _schedule(after: const Duration(seconds: 5));
-      }
+      // Try again, backing off, for example once a dropped connection is
+      // back. This goes on after the access token expires, as the refresh
+      // token or credentials may still work.
+      final delay = Duration(seconds: 5 << _failures.clamp(0, 4));
+      _failures++;
+      _schedule(after: delay);
     } finally {
       _renewing = null;
       done.complete();

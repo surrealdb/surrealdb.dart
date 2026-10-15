@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../cbor/codec.dart';
 import '../errors.dart';
 import '../internal/jwt.dart';
 import '../protocol/codec.dart';
@@ -308,6 +309,9 @@ class WebSocketEngine implements Engine {
     'let',
     'unset',
     'reset',
+    'refresh',
+    'attach',
+    'detach',
   };
 
   /// Abandons [channel] as if the server had dropped it, so the usual
@@ -438,8 +442,13 @@ class WebSocketEngine implements Engine {
   }
 
   Future<void> _restoreState(SessionState state, Uuid? session) async {
-    if (state.namespace != null || state.database != null) {
-      await _call('use', [state.namespace, state.database], session: session);
+    final namespace = state.replayNamespace;
+    final database = state.replayDatabase;
+    // A selection only partly known is made after authenticating, which may
+    // select the rest.
+    final known = namespace is! SurrealNone && database is! SurrealNone;
+    if (known && (namespace != null || database != null)) {
+      await _call('use', [namespace, database], session: session);
     }
     for (final MapEntry(:key, :value) in state.variables.entries.toList()) {
       await _call('let', [key, value], session: session);
@@ -465,13 +474,41 @@ class WebSocketEngine implements Engine {
         // Any other failure fails the attempt, which is tried again.
         if (!rejectsAuthentication(error)) rethrow;
         // The server rejected the token, and the refresh token if there was
-        // one, for example because they expired. The connection itself is
-        // fine, so carry on without them rather than failing every attempt.
-        state.setTokens(null, null);
+        // one, for example because they expired. The driver may sign in
+        // again; if that fails for now, the attempt fails with the tokens
+        // kept, so the next one tries again.
+        final rejected = state.token;
         await _onAuthenticationLost?.call(session, error,
             (method, params) => _call(method, params, session: session));
+        // The connection itself is fine, so otherwise carry on without them
+        // rather than failing every attempt.
+        if (state.token == rejected) state.setTokens(null, null);
       }
     }
+    if (!known && (namespace is String || database is String)) {
+      await _useKeeping(namespace, database, session);
+    }
+  }
+
+  /// Selects [namespace] and [database], keeping the session's own for one
+  /// that is NONE.
+  Future<void> _useKeeping(
+      Object? namespace, Object? database, Uuid? session) async {
+    if (codec is! CborCodec) {
+      // NONE would arrive as null and clear it, so send what is selected.
+      final result = await _call(
+          'query',
+          [
+            'RETURN [session::ns(), session::db()]',
+            const <String, Object?>{},
+          ],
+          session: session);
+      final [current] = result! as List<Object?>;
+      final [ns, db] = (current! as Map)['result'] as List<Object?>;
+      if (namespace is SurrealNone) namespace = ns;
+      if (database is SurrealNone) database = db;
+    }
+    await _call('use', [namespace, database], session: session);
   }
 
   void _failPending(Object error) {
