@@ -111,9 +111,12 @@ mixin SurrealQueryable {
         }
         return;
       } on ServerError catch (error) {
-        // A server that does not know query_stream says so before sending
-        // anything. Remember that, and run the query buffered instead.
-        if (started || error.code != -32601) rethrow;
+        // A server that does not know query_stream, or whose capabilities
+        // deny it, says so before sending anything. Remember that, and run
+        // the query buffered instead.
+        final refused = error.code == -32601 ||
+            (error is NotAllowedError && error.methodName == 'query_stream');
+        if (started || !refused) rethrow;
         _client._streamingUnsupported = true;
       }
     }

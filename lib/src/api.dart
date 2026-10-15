@@ -33,7 +33,7 @@ final class SurrealApi {
   Future<ApiResponse> invoke(
     String path, {
     String method = 'get',
-    Object? body,
+    Object? body = const _NoBody(),
     Map<String, String>? headers,
     Map<String, String>? query,
   }) async {
@@ -45,7 +45,8 @@ final class SurrealApi {
           'method': method.toLowerCase(),
           'headers': {..._headers, ...?headers},
           if (query != null) 'query': query,
-          if (body != null) 'body': body,
+          // An explicit null is sent as NULL; a body left out arrives as NONE.
+          if (body is! _NoBody) 'body': body,
         },
       },
     );
@@ -59,28 +60,28 @@ final class SurrealApi {
 
   /// Calls [path] with `POST`.
   Future<ApiResponse> post(String path,
-          {Object? body,
+          {Object? body = const _NoBody(),
           Map<String, String>? headers,
           Map<String, String>? query}) =>
       invoke(path, method: 'post', body: body, headers: headers, query: query);
 
   /// Calls [path] with `PUT`.
   Future<ApiResponse> put(String path,
-          {Object? body,
+          {Object? body = const _NoBody(),
           Map<String, String>? headers,
           Map<String, String>? query}) =>
       invoke(path, method: 'put', body: body, headers: headers, query: query);
 
   /// Calls [path] with `PATCH`.
   Future<ApiResponse> patch(String path,
-          {Object? body,
+          {Object? body = const _NoBody(),
           Map<String, String>? headers,
           Map<String, String>? query}) =>
       invoke(path, method: 'patch', body: body, headers: headers, query: query);
 
   /// Calls [path] with `DELETE`.
   Future<ApiResponse> delete(String path,
-          {Object? body,
+          {Object? body = const _NoBody(),
           Map<String, String>? headers,
           Map<String, String>? query}) =>
       invoke(path,
@@ -90,6 +91,11 @@ final class SurrealApi {
   Future<ApiResponse> trace(String path,
           {Map<String, String>? headers, Map<String, String>? query}) =>
       invoke(path, method: 'trace', headers: headers, query: query);
+}
+
+/// Marks a body that was left out, as distinct from an explicit null.
+final class _NoBody {
+  const _NoBody();
 }
 
 /// The response from a [SurrealApi] call.

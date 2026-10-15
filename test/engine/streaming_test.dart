@@ -139,6 +139,27 @@ void main() {
     expect(server.methods.where((m) => m == 'query'), hasLength(2));
   });
 
+  test('falls back when the capabilities deny streaming', () async {
+    await db.connect(server.url,
+        options: const ConnectOptions(versionCheck: false));
+    server.handler = (r) => switch (r.method) {
+          'query_stream' =>
+            const FakeError('Method not allowed', code: -32602, extra: {
+              'kind': 'NotAllowed',
+              'details': {
+                'kind': 'Method',
+                'details': {'name': 'query_stream'},
+              },
+            }),
+          'query' => const FakeResult([
+              {'status': 'OK', 'time': '1ms', 'result': 1},
+            ]),
+          _ => FakeSurrealServer.defaultReply(r),
+        };
+    expect(await db.queryStream('q').toList(), hasLength(2));
+    expect(server.methods.where((m) => m == 'query_stream'), hasLength(1));
+  });
+
   test('a failed query fails the stream', () async {
     await connect('surrealdb-3.3.4');
     server.handler = (r) => r.method == 'query_stream'

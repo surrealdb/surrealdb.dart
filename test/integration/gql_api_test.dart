@@ -32,6 +32,9 @@ void main() {
         DEFINE API OVERWRITE "/echo" FOR post THEN {
           RETURN { status: 201, body: $request.body };
         };
+        DEFINE API OVERWRITE "/body-type" FOR post THEN {
+          RETURN { status: 200, body: type::of($request.body) };
+        };
       ''');
       await admin.close();
     });
@@ -40,7 +43,8 @@ void main() {
       final admin = await connectRoot(wsUrl);
       await admin.query('REMOVE TABLE IF EXISTS gperson; '
           'REMOVE TABLE IF EXISTS knows; REMOVE CONFIG IF EXISTS GRAPHQL; '
-          'REMOVE API IF EXISTS "/greet/:name"; REMOVE API IF EXISTS "/echo";');
+          'REMOVE API IF EXISTS "/greet/:name"; REMOVE API IF EXISTS "/echo"; '
+          'REMOVE API IF EXISTS "/body-type";');
       await admin.close();
     });
 
@@ -99,6 +103,11 @@ void main() {
               await db.api.post('/echo', body: {'item': 'book', 'n': 2});
           expect(response.status, 201);
           expect(response.body, {'item': 'book', 'n': 2});
+        });
+
+        test('api tells an explicit null body from no body', () async {
+          expect((await db.api.post('/body-type', body: null)).body, 'null');
+          expect((await db.api.post('/body-type')).body, 'none');
         });
 
         test('an unsuccessful api call throws from value()', () async {
