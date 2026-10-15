@@ -3,11 +3,13 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../cbor/codec.dart';
 import '../errors.dart';
 import '../internal/jwt.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
 import 'session_state.dart';
@@ -307,8 +309,13 @@ class WebSocketEngine implements Engine {
 
   Future<void> _restoreSession() async {
     final session = _session;
-    if (session.namespace != null || session.database != null) {
-      await _call('use', [session.namespace, session.database]);
+    final namespace = session.replayNamespace;
+    final database = session.replayDatabase;
+    // A selection only partly known is made after authenticating, which may
+    // select the rest.
+    final known = namespace is! SurrealNone && database is! SurrealNone;
+    if (known && (namespace != null || database != null)) {
+      await _call('use', [namespace, database]);
     }
     for (final MapEntry(:key, :value) in session.variables.entries) {
       await _call('let', [key, value]);
@@ -343,6 +350,26 @@ class WebSocketEngine implements Engine {
         await _onAuthenticationLost?.call(error, _call);
       }
     }
+    if (!known && (namespace is String || database is String)) {
+      await _useKeeping(namespace, database);
+    }
+  }
+
+  /// Selects [namespace] and [database], keeping the session's own for one
+  /// that is NONE.
+  Future<void> _useKeeping(Object? namespace, Object? database) async {
+    if (codec is! CborCodec) {
+      // NONE would arrive as null and clear it, so send what is selected.
+      final result = await _call('query', [
+        'RETURN [session::ns(), session::db()]',
+        const <String, Object?>{},
+      ]);
+      final [current] = result! as List<Object?>;
+      final [ns, db] = (current! as Map)['result'] as List<Object?>;
+      if (namespace is SurrealNone) namespace = ns;
+      if (database is SurrealNone) database = db;
+    }
+    await _call('use', [namespace, database]);
   }
 
   void _failPending(Object error) {

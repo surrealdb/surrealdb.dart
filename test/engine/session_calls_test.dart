@@ -32,6 +32,35 @@ void main() {
       server.requests.lastWhere((r) => r.method == method).params;
 
   group('use', () {
+    test('a namespace that was never known is kept after a reconnect',
+        () async {
+      // An older server that does not say what it selected.
+      server.handler = (r) => r.method == 'use'
+          ? const FakeResult(null)
+          : FakeSurrealServer.defaultReply(r);
+      await db.authenticate('token');
+      await db.use(database: 'db');
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(server.methods, ['authenticate', 'use']);
+      expect(lastParams('use'), [none, 'db']);
+    });
+
+    test('a cleared namespace is cleared again after a reconnect', () async {
+      await db.use(namespace: 'ns', database: 'db');
+      await db.use(namespace: null);
+      await db.use(namespace: 'other');
+      server.requests.clear();
+
+      await server.dropAll();
+      await eventually(() =>
+          db.status == ConnectionStatus.connected && server.accepted == 2);
+      expect(lastParams('use'), ['other', null]);
+    });
+
     test('sends NONE for a value it does not know, to keep it', () async {
       await db.use(database: 'db');
       expect(lastParams('use'), [none, 'db']);
@@ -143,6 +172,14 @@ void main() {
       await eventually(() => closed);
       expect(errors.single, isA<LiveQueryLostError>());
       expect(server.methods, isNot(contains('live')));
+    });
+
+    test('reset does not wait for a paused listener', () async {
+      final live = await db.live('person');
+      final subscription = live.stream.listen(null, onError: (_) {});
+      subscription.pause();
+      await db.reset().timeout(const Duration(seconds: 2));
+      await subscription.cancel();
     });
 
     test('a paused listener does not hold up the other restarts', () async {
