@@ -22,5 +22,23 @@ void main() {
       expect(decoded, const SurrealDateTime(-1, 500000000));
       expect(matches, isTrue);
     });
+
+    test('range bounds decode with their inclusivity', () async {
+      final [half, closed, open] =
+          await db.query('RETURN 1..5; RETURN 1..=5; RETURN 1>..5;');
+      expect(half, const Range(begin: BoundIncluded(1), end: BoundExcluded(5)));
+      expect(
+          closed, const Range(begin: BoundIncluded(1), end: BoundIncluded(5)));
+      expect(open, const Range(begin: BoundExcluded(1), end: BoundExcluded(5)));
+    });
+
+    test('an exclusive range bound round trips through the server', () async {
+      const range = Range(begin: BoundIncluded(1), end: BoundExcluded(5));
+      final [echoed, matches] = await db.query(
+          r'RETURN $range; RETURN $range == 1..5;',
+          bindings: {'range': range});
+      expect(echoed, range);
+      expect(matches, isTrue);
+    });
   }, skip: skipIntegration);
 }

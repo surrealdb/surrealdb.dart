@@ -4,6 +4,7 @@ import 'package:cbor/cbor.dart';
 
 import '../protocol/codec.dart';
 import '../value/value.dart';
+import 'reader.dart';
 import 'tags.dart';
 
 /// Translates between Dart values and the CBOR wire format used by SurrealDB.
@@ -32,7 +33,7 @@ class CborCodec implements SurrealCodec {
 
   /// Decodes CBOR bytes into a Dart value.
   @override
-  Object? decode(List<int> bytes) => _fromCbor(cborDecode(bytes));
+  Object? decode(List<int> bytes) => CborReader(bytes, _applyTag).readAll();
 
   // ---------------------------------------------------------------------------
   // Encoding
@@ -201,21 +202,17 @@ class CborCodec implements SurrealCodec {
   // Decoding
   // ---------------------------------------------------------------------------
 
-  Object? _fromCbor(CborValue value) => _decode(value, value.tags);
-
-  Object? _decode(CborValue value, List<int> tags) {
-    if (tags.isEmpty) return _decodeUntagged(value);
-    final tag = tags.first;
-    final rest = tags.sublist(1);
+  /// Rebuilds the SurrealDB value for [tag] from the decoded [value] it
+  /// wraps. Nested tags have already been applied to [value].
+  Object? _applyTag(int tag, Object? value) {
     switch (tag) {
       case SurrealCborTags.none:
         return null;
       case SurrealCborTags.table:
-        return Table(_decode(value, rest) as String);
+        return Table(value as String);
       case SurrealCborTags.recordId:
-        final inner = _decode(value, rest);
-        if (inner is String) return StringRecordId(inner);
-        final parts = inner as List;
+        if (value is String) return StringRecordId(value);
+        final parts = value as List;
         final id = parts[1];
         if (id is Range) {
           return RecordIdRange(parts[0] as String,
@@ -223,107 +220,89 @@ class CborCodec implements SurrealCodec {
         }
         return RecordId(parts[0] as String, id as Object);
       case SurrealCborTags.uuidString:
-        return Uuid(_decode(value, rest) as String);
+        return Uuid(value as String);
       case SurrealCborTags.uuidBinary:
-        return Uuid.fromBytes(_asBytes(_decode(value, rest)));
+        return Uuid.fromBytes(_asBytes(value));
       case SurrealCborTags.decimal:
-        return Decimal(_decode(value, rest) as String);
+        return Decimal(value as String);
       case SurrealCborTags.specDatetime:
-        return SurrealDateTime.parse(_decode(value, rest) as String);
+        return SurrealDateTime.parse(value as String);
+      case SurrealCborTags.epochDatetime:
+        // Whole seconds stay exact; only a fractional epoch goes through
+        // floating point.
+        if (value is int) return SurrealDateTime(value, 0);
+        final seconds = _toDouble(value);
+        var whole = seconds.floor();
+        var nanos = ((seconds - whole) * 1000000000).round();
+        if (nanos == 1000000000) {
+          whole++;
+          nanos = 0;
+        }
+        return SurrealDateTime(whole, nanos);
       case SurrealCborTags.datetime:
-        final parts = (_decode(value, rest) as List).cast<int>();
-        return SurrealDateTime(parts[0], parts.length > 1 ? parts[1] : 0);
+        final parts = (value as List).cast<int>();
+        return SurrealDateTime(
+          parts.isNotEmpty ? parts[0] : 0,
+          parts.length > 1 ? parts[1] : 0,
+        );
       case SurrealCborTags.durationString:
-        return SurrealDuration.parse(_decode(value, rest) as String);
+        return SurrealDuration.parse(value as String);
       case SurrealCborTags.duration:
-        final parts = (_decode(value, rest) as List).cast<int>();
+        final parts = (value as List).cast<int>();
         return SurrealDuration(
           seconds: parts.isNotEmpty ? parts[0] : 0,
           nanoseconds: parts.length > 1 ? parts[1] : 0,
         );
       case SurrealCborTags.future:
-        return SurrealFuture(_decode(value, rest) as String);
+        return SurrealFuture(value as String);
       case SurrealCborTags.range:
-        final parts = _decode(value, rest) as List;
+        final parts = value as List;
         return Range(begin: _asBound(parts[0]), end: _asBound(parts[1]));
       case SurrealCborTags.boundIncluded:
-        return BoundIncluded(_decode(value, rest));
+        return BoundIncluded(value);
       case SurrealCborTags.boundExcluded:
-        return BoundExcluded(_decode(value, rest));
+        return BoundExcluded(value);
       case SurrealCborTags.file:
-        final parts = (_decode(value, rest) as List).cast<String>();
+        final parts = (value as List).cast<String>();
         return FileRef(parts[0], parts[1]);
       case SurrealCborTags.set:
-        return _decode(value, rest);
+        return value;
       case SurrealCborTags.geometryPoint:
-        final parts = _decode(value, rest) as List;
+        final parts = value as List;
         return GeometryPoint(_toDouble(parts[0]), _toDouble(parts[1]));
       case SurrealCborTags.geometryLine:
-        return GeometryLine(
-            (_decode(value, rest) as List).cast<GeometryPoint>());
+        return GeometryLine((value as List).cast<GeometryPoint>());
       case SurrealCborTags.geometryPolygon:
-        return GeometryPolygon(
-            (_decode(value, rest) as List).cast<GeometryLine>());
+        return GeometryPolygon((value as List).cast<GeometryLine>());
       case SurrealCborTags.geometryMultiPoint:
-        return GeometryMultiPoint(
-            (_decode(value, rest) as List).cast<GeometryPoint>());
+        return GeometryMultiPoint((value as List).cast<GeometryPoint>());
       case SurrealCborTags.geometryMultiLine:
-        return GeometryMultiLine(
-            (_decode(value, rest) as List).cast<GeometryLine>());
+        return GeometryMultiLine((value as List).cast<GeometryLine>());
       case SurrealCborTags.geometryMultiPolygon:
-        return GeometryMultiPolygon(
-            (_decode(value, rest) as List).cast<GeometryPolygon>());
+        return GeometryMultiPolygon((value as List).cast<GeometryPolygon>());
       case SurrealCborTags.geometryCollection:
-        return GeometryCollection(
-            (_decode(value, rest) as List).cast<Geometry>());
+        return GeometryCollection((value as List).cast<Geometry>());
+      case SurrealCborTags.positiveBignum:
+        return _bignum(_asBytes(value));
+      case SurrealCborTags.negativeBignum:
+        final n = _bignum(_asBytes(value));
+        return n is int ? -1 - n : -BigInt.one - (n as BigInt);
       default:
         // An unknown tag is ignored and the inner value is returned as is.
-        return _decode(value, rest);
+        return value;
     }
   }
 
-  Object? _decodeUntagged(CborValue value) {
-    switch (value) {
-      case CborNull():
-      case CborUndefined():
-        return null;
-      case CborBool():
-        return value.value;
-      case CborInt():
-        final big = value.toBigInt();
-        return big.isValidInt ? big.toInt() : big;
-      case CborFloat():
-        return value.value;
-      case CborDateTime():
-        return SurrealDateTime.fromDateTime(value.toDateTime());
-      case CborBytes():
-        return Uint8List.fromList(value.bytes);
-      case CborString():
-        return value.toString();
-      case CborList():
-        return [for (final item in value) _fromCbor(item)];
-      case CborMap():
-        final result = <String, dynamic>{};
-        value.forEach((key, val) {
-          final decodedKey = _fromCbor(key);
-          result[decodedKey is String ? decodedKey : decodedKey.toString()] =
-              _fromCbor(val);
-        });
-        return result;
-      default:
-        throw ArgumentError('Cannot decode value of type ${value.runtimeType}');
+  static Object _bignum(Uint8List bytes) {
+    var result = BigInt.zero;
+    for (final byte in bytes) {
+      result = (result << 8) | BigInt.from(byte);
     }
+    return result.isValidInt ? result.toInt() : result;
   }
 
-  /// Coerces a decoded range part into a [Bound].
-  ///
-  /// Inclusive and exclusive bounds reach this point as [BoundIncluded] or
-  /// [BoundExcluded] when their CBOR tag survived decoding, which it does for
-  /// string and record id bounds. The cbor package drops tags from plain
-  /// integers, so an integer bound arrives here untagged. In that case we treat
-  /// it as inclusive, which is the most common form. To keep the distinction
-  /// for integer bounds, send them through SurrealQL rather than as a decoded
-  /// value.
+  /// Coerces a decoded range part into a [Bound]. The server always tags a
+  /// bound as inclusive or exclusive; an untagged value is read as inclusive.
   Bound? _asBound(Object? value) {
     if (value == null) return null;
     if (value is Bound) return value;
