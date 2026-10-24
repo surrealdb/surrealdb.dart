@@ -32,3 +32,27 @@ Future<Surreal> connectRoot(String url,
   await db.use(namespace: 'test', database: 'test');
   return db;
 }
+
+final Map<String, Future<List<int>>> _versions = {};
+
+/// The `[major, minor]` version of the server at [url], read once.
+Future<List<int>> serverVersion([String? url]) =>
+    _versions.putIfAbsent(url ?? wsUrl, () async {
+      final db = Surreal();
+      await db.connect(url ?? wsUrl);
+      try {
+        final match =
+            RegExp(r'(\d+)\.(\d+)\.\d+').firstMatch(await db.version());
+        return [int.parse(match!.group(1)!), int.parse(match.group(2)!)];
+      } finally {
+        await db.close();
+      }
+    });
+
+/// Whether the server is at least [major].[minor]. A test of a feature newer
+/// than the oldest server in the CI matrix starts with
+/// `if (!await serverAtLeast(3, 3)) return markTestSkipped('needs 3.3');`.
+Future<bool> serverAtLeast(int major, int minor) async {
+  final [serverMajor, serverMinor] = await serverVersion();
+  return serverMajor > major || (serverMajor == major && serverMinor >= minor);
+}
