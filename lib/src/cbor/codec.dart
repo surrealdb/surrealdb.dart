@@ -53,6 +53,13 @@ class CborCodec implements SurrealCodec {
       case int():
         return CborSmallInt(value);
       case BigInt():
+        // SurrealDB integers are 64 bit signed. A larger value would be sent
+        // as an unsigned integer or a bignum, which 3.x reads as a wrapped
+        // number (or never answers) and 4.0 refuses, so fail here instead.
+        if (value.bitLength > 63) {
+          throw ArgumentError.value(value, 'value',
+              'does not fit in a 64 bit signed integer, send a Decimal');
+        }
         return CborInt(value);
       case double():
         return CborFloat(value);
