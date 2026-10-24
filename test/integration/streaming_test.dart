@@ -50,6 +50,8 @@ void main() {
     }
 
     test('large results arrive in several batches over WebSocket', () async {
+      // Servers before 3.3 answer a streamed query with one batch.
+      if (!await serverAtLeast(3, 3)) return markTestSkipped('needs 3.3');
       final db = await connectRoot(wsUrl);
       addTearDown(db.close);
       await db.query('REMOVE TABLE IF EXISTS stream_batch; '
