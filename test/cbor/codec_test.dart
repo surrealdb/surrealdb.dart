@@ -1,3 +1,4 @@
+import 'package:surrealdb/src/cbor/reader.dart';
 import 'package:surrealdb/surrealdb.dart';
 import 'package:test/test.dart';
 
@@ -275,6 +276,98 @@ void main() {
 
     test('a List stays a List', () {
       expect(roundTrip([1, 1]), isA<List<Object?>>());
+    });
+  });
+
+  group('what a 4.0 server accepts', () {
+    // 4.0 refuses the text forms of datetimes (tag 0), uuids (tag 9) and
+    // durations (tag 13), integers outside 64 bits, and tag 6 around
+    // anything but null. Every server since 1.5.0 reads the forms the client
+    // sends instead.
+    Set<int> tagsIn(List<int> bytes) {
+      final tags = <int>{};
+      CborReader(bytes, (tag, value) {
+        tags.add(tag);
+        return value;
+      }).readAll();
+      return tags;
+    }
+
+    test('datetimes, uuids and durations never use the text tags', () {
+      final uuid = Uuid('0192e3c4-0000-7000-8000-000000000001');
+      final values = <Object?>[
+        DateTime.utc(2024, 5, 6, 7, 8, 9, 10),
+        const SurrealDateTime(-1, 999999999),
+        const Duration(seconds: 5),
+        const Duration(microseconds: -1),
+        SurrealDuration.parse('1h30m'),
+        uuid,
+        RecordId('t', uuid),
+        RecordId('t', DateTime.utc(2024)),
+        RecordIdRange(
+          't',
+          begin: BoundIncluded(DateTime.utc(2024)),
+          end: BoundExcluded(uuid),
+        ),
+        Range(
+          begin: BoundIncluded(const Duration(seconds: 1)),
+          end: BoundExcluded(DateTime.utc(2024)),
+        ),
+        {
+          'at': DateTime.utc(2024),
+          'for': [const Duration(seconds: 1), uuid],
+          DateTime.utc(2025): uuid,
+        },
+        <Object?>{DateTime.utc(2024), const Duration(seconds: 1), uuid},
+      ];
+      for (final setsAsArrays in [false, true]) {
+        final codec = CborCodec(setsAsArrays: setsAsArrays);
+        for (final value in values) {
+          expect(tagsIn(codec.encode(value)).intersection({0, 9, 13}), isEmpty,
+              reason: '$value');
+        }
+      }
+      expect(tagsIn(codec.encode(DateTime.utc(2024))), {12});
+      expect(tagsIn(codec.encode(const Duration(seconds: 5))), {14});
+      expect(tagsIn(codec.encode(uuid)), {37});
+    });
+
+    test('NONE is the only value under tag 6', () {
+      expect(codec.encode([none, null, 0, '']),
+          [0x84, 0xc6, 0xf6, 0xf6, 0x00, 0x60]);
+    });
+
+    test('integers inside 64 bits are sent as plain integers', () {
+      expect(codec.encode(BigInt.from(5)), [0x05]);
+      expect(
+        codec.encode(BigInt.parse('9223372036854775807')),
+        [0x1b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+      );
+      expect(
+        codec.encode(BigInt.parse('-9223372036854775808')),
+        [0x3b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+      );
+    });
+
+    test('integers outside 64 bits are refused before they are sent', () {
+      for (final value in [
+        '9223372036854775808',
+        '18446744073709551615',
+        '18446744073709551616',
+        '-9223372036854775809',
+        '-18446744073709551617',
+      ]) {
+        expect(() => codec.encode(BigInt.parse(value)), throwsArgumentError,
+            reason: value);
+        expect(() => codec.encode([BigInt.parse(value)]), throwsArgumentError,
+            reason: value);
+      }
+    });
+
+    test('a decoded 64 bit unsigned integer cannot be sent back', () {
+      final decoded =
+          codec.decode([0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+      expect(() => codec.encode(decoded), throwsArgumentError);
     });
   });
 }
