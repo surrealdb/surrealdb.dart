@@ -6,6 +6,21 @@ import 'package:test/test.dart';
 
 import 'support.dart';
 
+const _noGql = 'the server has not enabled the experimental gql capability';
+
+/// Whether the server runs GQL. 3.2 needs `--allow-experimental gql`, which
+/// the CI server does not set, so the GQL tests skip there.
+Future<bool> gqlEnabled(Surreal db) async {
+  try {
+    await db.gql('MATCH (n:gql_probe) RETURN n');
+  } on NotAllowedError catch (e) {
+    return !e.message.contains('Experimental capability');
+  } on Object {
+    // Any other failure means the statement ran.
+  }
+  return true;
+}
+
 void main() {
   group('gql, graphql and api', () {
     setUpAll(() async {
@@ -64,6 +79,7 @@ void main() {
         tearDown(() async => db.close());
 
         test('gql runs an ISO GQL graph query with bindings', () async {
+          if (!await gqlEnabled(db)) return markTestSkipped(_noGql);
           final [rows] = await db.gql(
             r'MATCH (p:gperson)-[:knows]->(f:gperson) WHERE p.name = $n '
             'RETURN f.name',
@@ -75,6 +91,7 @@ void main() {
         });
 
         test('gql statement errors are thrown', () async {
+          if (!await gqlEnabled(db)) return markTestSkipped(_noGql);
           await expectLater(
             db.gql('MATCH (p:nosuchlabel) RETURN p'),
             throwsA(isA<NotFoundError>()),
