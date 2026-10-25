@@ -20,7 +20,8 @@ import 'tags.dart';
 /// adds SurrealDB 4.0's sized numbers ([SizedInt] and [SizedFloat]) as tags
 /// 180 to 188, and is otherwise the same byte for byte. The engines offer
 /// `cbor.2` and switch to it when the server accepts it, so a 3.x server
-/// keeps getting plain `cbor`.
+/// keeps getting plain `cbor`. A subclass is sent as it is, in its own
+/// dialect.
 ///
 /// Decoding is as strict as a SurrealDB 4.0 server's: input it would refuse,
 /// such as an unknown tag or an integer beyond 64 bits, is a

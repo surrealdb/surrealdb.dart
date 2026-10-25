@@ -66,6 +66,14 @@ class FakeSurrealServer {
   /// How many connections have been accepted in total.
   int accepted = 0;
 
+  /// The subprotocols the last connection offered.
+  List<String> offered = const [];
+
+  /// Picks the subprotocol from those offered. The default takes the first,
+  /// as SurrealDB does when it knows them all.
+  String Function(List<String> offered) selectProtocol =
+      (offered) => offered.first;
+
   static Future<FakeSurrealServer> start() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = FakeSurrealServer._(server);
@@ -101,7 +109,8 @@ class FakeSurrealServer {
   Future<void> _onRequest(HttpRequest request) async {
     final socket = await WebSocketTransformer.upgrade(
       request,
-      protocolSelector: (protocols) => protocols.first,
+      protocolSelector: (protocols) =>
+          selectProtocol(offered = protocols.toList()),
     );
     accepted++;
     _sockets.add(socket);

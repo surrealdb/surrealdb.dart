@@ -138,7 +138,13 @@ class WebSocketEngine implements Engine {
   /// Opens a socket and makes it the current channel. On failure the socket
   /// is closed, so a failed attempt never leaves a connection behind.
   Future<void> _connect() async {
-    final channel = WebSocketChannel.connect(_url!, protocols: [_codec.name]);
+    final codec = _codec;
+    // The built-in CBOR codec offers cbor.2 first: a 4.0 server picks it, and
+    // one before 4.0, which only knows cbor, picks that. A subclass is the
+    // caller's own, and is used as it is.
+    final negotiate = codec is CborCodec && codec.runtimeType == CborCodec;
+    final protocols = negotiate ? const [_cbor2, _cbor] : [codec.name];
+    final channel = WebSocketChannel.connect(_url!, protocols: protocols);
     try {
       await channel.ready.timeout(_timeout);
     } catch (error) {
@@ -147,6 +153,9 @@ class WebSocketEngine implements Engine {
         throw const SurrealError('Timed out while connecting to the server');
       }
       throw SurrealError('Failed to connect to the server', cause: error);
+    }
+    if (negotiate) {
+      this.codec = codec.copyWith(sizedNumbers: channel.protocol == _cbor2);
     }
     _channel = channel;
     _subscription = channel.stream.listen(
@@ -160,6 +169,9 @@ class WebSocketEngine implements Engine {
       },
     );
   }
+
+  static const _cbor = 'cbor';
+  static const _cbor2 = 'cbor.2';
 
   Future<void> _closeChannel(WebSocketChannel channel) async {
     try {

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
+import '../cbor/codec.dart';
 import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
@@ -193,10 +194,14 @@ class HttpEngine implements Engine {
   Future<Object?> _send(String method, List<Object?> params) async {
     if (_url == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
+    final codec = _codec;
     final body = _protocol.encodeRequest(id, method, params);
     final headers = <String, String>{
-      'Content-Type': _codec.contentType,
-      'Accept': _codec.contentType,
+      'Content-Type': codec.contentType,
+      // The built-in CBOR codec asks for cbor.2. A 4.0 server answers in it,
+      // and the requests after that are sent in it too; one before 4.0
+      // answers in cbor. A subclass is the caller's own, and is used as is.
+      'Accept': _negotiates(codec) ? _cbor2 : codec.contentType,
       if (_session.token != null) 'Authorization': 'Bearer ${_session.token}',
       if (_session.namespace != null) 'Surreal-NS': _session.namespace!,
       if (_session.database != null) 'Surreal-DB': _session.database!,
@@ -216,6 +221,17 @@ class HttpEngine implements Engine {
             abort.complete();
             throw RequestTimeoutError(method, timeout);
           });
+    // The reply is decoded in the dialect it came in, which the requests
+    // after it then use.
+    final current = _codec;
+    final type = response.headers['content-type'];
+    if (current is CborCodec &&
+        _negotiates(current) &&
+        type != null &&
+        type.startsWith('application/cbor') &&
+        current.sizedNumbers != _isCbor2(type)) {
+      this.codec = current.copyWith(sizedNumbers: _isCbor2(type));
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // Prefer the server's own error, when the body carries one.
       final error = _tryDecodeError(response.bodyBytes, id);
@@ -229,6 +245,16 @@ class HttpEngine implements Engine {
     if (decoded.error != null) throw decoded.error!;
     return decoded.result;
   }
+
+  static const _cbor2 = 'application/cbor; v=2';
+
+  static bool _negotiates(SurrealCodec codec) => codec.runtimeType == CborCodec;
+
+  /// Whether the media [type] is `application/cbor` with `v=2`.
+  static bool _isCbor2(String type) => type
+      .split(';')
+      .skip(1)
+      .any((parameter) => parameter.replaceAll(' ', '') == 'v=2');
 
   /// The error in [body] when it is SurrealDB's reply to request [id]. A
   /// body from anything else, such as a proxy in front of the server, is

@@ -130,6 +130,12 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
   /// call to [version].
   String? get serverVersion => _version;
 
+  /// The codec the connection speaks, or null when not connected. With CBOR
+  /// this is a [CborCodec] whose [CborCodec.sizedNumbers] says whether the
+  /// server negotiated `cbor.2`, which a 4.0 server does: over WebSocket at
+  /// connect, over HTTP with its first reply.
+  SurrealCodec? get codec => _engine?.codec;
+
   /// The current connection status.
   ConnectionStatus get status {
     final status = _engine?.status ?? ConnectionStatus.disconnected;
@@ -292,7 +298,7 @@ class Surreal with SurrealQueryable, SurrealSessionMethods {
     final major = _parseVersion(_version ?? '')?.first;
     final arrays = major == null || major < 3;
     if (codec.setsAsArrays != arrays) {
-      engine.codec = CborCodec(setsAsArrays: arrays);
+      engine.codec = codec.copyWith(setsAsArrays: arrays);
     }
   }
 
