@@ -74,6 +74,16 @@ void main() {
       expect(rows.length, 1);
     });
 
+    test('a BigInt beyond 64 bits arrives exact', () async {
+      final big = BigInt.one << 63;
+      final [type, value] = await db.query(
+        r'RETURN type::of($big); RETURN <string> $big',
+        bindings: {'big': big},
+      );
+      expect(type, 'decimal');
+      expect(value, '$big');
+    });
+
     test('live query receives a create notification', () async {
       await db.query('DEFINE TABLE IF NOT EXISTS person');
       final live = await db.live('person');

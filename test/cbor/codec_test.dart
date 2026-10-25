@@ -17,6 +17,25 @@ void main() {
       expect(roundTrip(3.5), 3.5);
     });
 
+    test('a BigInt within 64 bits is an integer', () {
+      final max = (BigInt.one << 63) - BigInt.one;
+      final min = -(BigInt.one << 63);
+      // A 64-bit unsigned and a 64-bit negative CBOR integer.
+      expect(codec.encode(max), [0x1b, 0x7f, ...List.filled(7, 0xff)]);
+      expect(codec.encode(min), [0x3b, 0x7f, ...List.filled(7, 0xff)]);
+    });
+
+    test('a BigInt beyond 64 bits is a decimal', () {
+      final above = BigInt.one << 63;
+      final below = -(BigInt.one << 63) - BigInt.one;
+      final huge = BigInt.parse('123456789012345678901234567890');
+      expect(roundTrip(above), Decimal('$above'));
+      expect(roundTrip(below), Decimal('$below'));
+      expect(roundTrip(huge), Decimal('$huge'));
+      // Tag 10 over the digits.
+      expect(codec.encode(above).take(2), [0xca, 0x73]);
+    });
+
     test('lists and maps', () {
       expect(roundTrip([1, 2, 3]), [1, 2, 3]);
       expect(

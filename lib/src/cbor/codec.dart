@@ -38,6 +38,9 @@ class CborCodec implements SurrealCodec {
   // Encoding
   // ---------------------------------------------------------------------------
 
+  static final _i64Min = -(BigInt.one << 63);
+  static final _i64Max = (BigInt.one << 63) - BigInt.one;
+
   CborValue _toCbor(Object? value) {
     switch (value) {
       case null:
@@ -46,6 +49,11 @@ class CborCodec implements SurrealCodec {
         return CborBool(value);
       case int():
         return CborSmallInt(value);
+      case BigInt() when value < _i64Min || value > _i64Max:
+        // SurrealDB integers are 64-bit, so a larger one is sent as a decimal,
+        // which keeps it exact. As a CBOR integer a 3.x server would wrap it
+        // and a 4.0 server refuses it.
+        return CborString('$value', tags: const [SurrealCborTags.decimal]);
       case BigInt():
         return CborInt(value);
       case double():
