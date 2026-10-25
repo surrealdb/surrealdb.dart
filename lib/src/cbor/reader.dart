@@ -1,6 +1,14 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+/// [value] as an [int] when an `int` holds it exactly on this platform, and
+/// as is otherwise. On the web that means within 53 bits; `isValidInt` is no
+/// test there, as it accepts integers a JavaScript number only rounds to.
+Object exactInt(BigInt value) =>
+    value.bitLength <= (_web ? 53 : 63) ? value.toInt() : value;
+
+const _web = identical(0, 0.0);
+
 /// Builds a Dart value from a CBOR tag number and the already decoded value it
 /// wraps.
 typedef CborTagHandler = Object? Function(int tag, Object? value);
@@ -14,6 +22,11 @@ typedef CborTagHandler = Object? Function(int tag, Object? value);
 ///
 /// Integers that do not fit in a Dart `int` on the current platform become a
 /// [BigInt]. On the web that means anything outside the 53-bit safe range.
+///
+/// It decodes as strictly as SurrealDB does: an integer outside the 64-bit
+/// signed range (except as a `u64`, tag 186), a map key that is not a string
+/// or that repeats, and an indefinite-length string whose chunks are of
+/// another type or split a UTF-8 sequence are all errors.
 class CborReader {
   CborReader(List<int> bytes, this._onTag)
       : _bytes = bytes is Uint8List ? bytes : Uint8List.fromList(bytes) {
@@ -28,6 +41,18 @@ class CborReader {
   static const int _breakByte = 0xff;
   static const int _indefinite = -1;
 
+  static final _i64Max = (BigInt.one << 63) - BigInt.one;
+
+  /// The tags of SurrealDB's sized numbers: integers (180 to 186), then
+  /// floats (187 and 188).
+  static const int _firstSizedInt = 180;
+  static const int _u64 = 186;
+  static const int _lastSizedFloat = 188;
+
+  /// Whether the next item may be an integer beyond the 64-bit signed range,
+  /// which only a `u64` may be.
+  var _wide = false;
+
   /// Decodes a single CBOR item, failing if bytes are left over.
   Object? readAll() {
     final value = _readItem();
@@ -41,16 +66,32 @@ class CborReader {
     final initial = _readByte();
     final major = initial >> 5;
     final info = initial & 0x1f;
+    final wide = _wide;
+    _wide = false;
     switch (major) {
       case 0:
-        return _readArgument(info);
+        final n = _readArgument(info);
+        if (!wide && n is BigInt && n > _i64Max) {
+          throw FormatException(
+              'Integer $n is outside the 64-bit signed range', _bytes, _offset);
+        }
+        return n;
       case 1:
         final n = _readArgument(info);
-        return n is int ? -1 - n : _normalise(-BigInt.one - (n as BigInt));
+        if (n is int) return -1 - n;
+        final value = -BigInt.one - (n as BigInt);
+        if (n > _i64Max) {
+          throw FormatException(
+              'Integer $value is outside the 64-bit signed '
+              'range',
+              _bytes,
+              _offset);
+        }
+        return _normalise(value);
       case 2:
         return _readBytes(info);
       case 3:
-        return utf8.decode(_readBytes(info));
+        return _readText(info);
       case 4:
         final length = _readLength(info);
         final list = <Object?>[];
@@ -69,7 +110,15 @@ class CborReader {
         final map = <String, dynamic>{};
         void entry() {
           final key = _readItem();
-          map[key is String ? key : key.toString()] = _readItem();
+          if (key is! String) {
+            throw FormatException(
+                'A CBOR map key must be a string, not $key', _bytes, _offset);
+          }
+          if (map.containsKey(key)) {
+            throw FormatException(
+                'Duplicate key $key in a CBOR map', _bytes, _offset);
+          }
+          map[key] = _readItem();
         }
 
         if (length == _indefinite) {
@@ -87,9 +136,29 @@ class CborReader {
         if (tag is! int) {
           throw FormatException('CBOR tag out of range', _bytes, _offset);
         }
+        if (tag >= _firstSizedInt && tag <= _lastSizedFloat) {
+          _checkSized(tag);
+          _wide = tag == _u64;
+        }
         return _onTag(tag, _readItem());
       default:
         return _readSimple(info);
+    }
+  }
+
+  /// Checks that a sized number holds the right type of item: an integer
+  /// under an integer kind, a float under a float kind.
+  void _checkSized(int tag) {
+    _ensure(1);
+    final initial = _bytes[_offset];
+    final major = initial >> 5;
+    final info = initial & 0x1f;
+    final ok = tag <= _u64
+        ? major == 0 || major == 1
+        : major == 7 && info >= 25 && info <= 27;
+    if (!ok) {
+      throw FormatException(
+          'CBOR tag $tag holds the wrong type of item', _bytes, _offset);
     }
   }
 
@@ -119,6 +188,7 @@ class CborReader {
   }
 
   bool _atBreak() {
+    _ensure(1);
     if (_bytes[_offset] == _breakByte) {
       _offset++;
       return true;
@@ -128,19 +198,43 @@ class CborReader {
 
   Uint8List _readBytes(int info) {
     final length = _readLength(info);
-    if (length != _indefinite) {
-      _ensure(length);
-      final bytes = Uint8List.sublistView(_bytes, _offset, _offset + length);
-      _offset += length;
-      return Uint8List.fromList(bytes);
-    }
-    // An indefinite length string is a sequence of definite length chunks.
+    if (length != _indefinite) return _readDefinite(length);
+    // An indefinite length string is a sequence of definite length chunks of
+    // the same type.
     final builder = BytesBuilder(copy: false);
     while (!_atBreak()) {
-      final chunk = _readByte();
-      builder.add(_readBytes(chunk & 0x1f));
+      builder.add(_readDefinite(_readChunkLength(2)));
     }
     return builder.takeBytes();
+  }
+
+  String _readText(int info) {
+    final length = _readLength(info);
+    if (length != _indefinite) return utf8.decode(_readDefinite(length));
+    // Each chunk must be valid UTF-8 on its own.
+    final text = StringBuffer();
+    while (!_atBreak()) {
+      text.write(utf8.decode(_readDefinite(_readChunkLength(3))));
+    }
+    return text.toString();
+  }
+
+  /// Reads the head of a chunk of an indefinite length string of [major] type.
+  int _readChunkLength(int major) {
+    final initial = _readByte();
+    final info = initial & 0x1f;
+    if (initial >> 5 != major || info == 31) {
+      throw FormatException(
+          'Wrong chunk in an indefinite length string', _bytes, _offset);
+    }
+    return _readLength(info);
+  }
+
+  Uint8List _readDefinite(int length) {
+    _ensure(length);
+    final bytes = Uint8List.sublistView(_bytes, _offset, _offset + length);
+    _offset += length;
+    return Uint8List.fromList(bytes);
   }
 
   int _readLength(int info) {
@@ -196,9 +290,7 @@ class CborReader {
     }
   }
 
-  /// Returns [value] as an `int` when it fits, otherwise as is.
-  static Object _normalise(BigInt value) =>
-      value.isValidInt ? value.toInt() : value;
+  static Object _normalise(BigInt value) => exactInt(value);
 
   static double _halfToDouble(int half) {
     final sign = (half & 0x8000) != 0 ? -1.0 : 1.0;

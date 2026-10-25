@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../cbor/reader.dart' show exactInt;
 import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/live.dart';
@@ -166,10 +167,16 @@ class _SurqlReader {
     if (number != null && !_isIdentChar(_peekAt(number.end - _i))) {
       _i = number.end;
       final digits = number.group(0)!;
+      // Digits past the 64-bit signed range name a key, as text.
+      final value = BigInt.parse(digits);
+      if (value < _i64Min || value > _i64Max) return digits;
       return _wholeNumber(digits);
     }
     return _ident();
   }
+
+  static final _i64Min = -(BigInt.one << 63);
+  static final _i64Max = (BigInt.one << 63) - BigInt.one;
 
   Object? _value() {
     _skipSpace();
@@ -276,7 +283,7 @@ class _SurqlReader {
   /// on the web means within 53 bits, and as a [BigInt] otherwise.
   static Object _wholeNumber(String digits) {
     final value = BigInt.parse(digits);
-    return value.isValidInt ? value.toInt() : value;
+    return exactInt(value);
   }
 
   /// The bytes written in hexadecimal as [text], as in `b"7879"`.
@@ -311,13 +318,19 @@ class _SurqlReader {
         final end = braced ? _text.indexOf('}', _i) : _i + 4;
         final digits = _text.substring(braced ? _i + 1 : _i, end);
         final code = int.tryParse(digits, radix: 16);
-        if (end < 0 || code == null) {
+        // A surrogate is half a character, never one on its own.
+        if (end < 0 ||
+            code == null ||
+            code > 0x10ffff ||
+            (code >= 0xd800 && code <= 0xdfff)) {
           throw FormatException('Invalid unicode escape', _text, _i);
         }
         _i = braced ? end + 1 : end;
         return String.fromCharCode(code);
-      default:
+      case r'\' || "'" || '"' || '`' || '⟨' || '⟩' || '/':
         return char;
+      default:
+        throw FormatException('Unknown escape \\$char', _text, _i - 1);
     }
   }
 

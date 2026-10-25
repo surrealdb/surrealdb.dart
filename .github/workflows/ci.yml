@@ -20,6 +20,10 @@ jobs:
       # Every test directory except the integration tests, which need a
       # server and run in the job below. Tests that need dart:io are marked
       # @TestOn('vm') and skipped on the web.
+      # The shared CBOR vectors from surrealdb-protocol, which are fetched
+      # rather than committed.
+      - name: Fetch the conformance vectors
+        run: tool/fetch_conformance_vectors.sh
       - name: Run unit tests on the VM
         run: dart test $(ls -d test/*/ | grep -v -e integration -e support)
       - name: Run unit tests on the web

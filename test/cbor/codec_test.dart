@@ -28,7 +28,7 @@ void main() {
     test('a BigInt beyond 64 bits is a decimal', () {
       final above = BigInt.one << 63;
       final below = -(BigInt.one << 63) - BigInt.one;
-      final huge = BigInt.parse('123456789012345678901234567890');
+      final huge = BigInt.parse('12345678901234567890123456789');
       expect(roundTrip(above), Decimal('$above'));
       expect(roundTrip(below), Decimal('$below'));
       expect(roundTrip(huge), Decimal('$huge'));
@@ -71,9 +71,9 @@ void main() {
       expect(roundTrip(id), id);
     });
 
-    test('StringRecordId', () {
+    test('StringRecordId decodes as the record id it names', () {
       const id = StringRecordId('person:tobie');
-      expect(roundTrip(id), id);
+      expect(roundTrip(id), const RecordId('person', 'tobie'));
     });
 
     test('Uuid', () {
@@ -221,26 +221,37 @@ void main() {
       }
     });
 
-    test('integers beyond the 53-bit safe range become BigInt', () {
-      // 0x1b ffffffffffffffff does not fit in an int on any platform.
+    test('integers keep all 64 bits', () {
+      // On the web, beyond the 53-bit safe range, this is a BigInt.
       expect(
-        codec.decode([0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
-        BigInt.parse('18446744073709551615'),
+        '${codec.decode([0x1b, 0x7f, ...List.filled(7, 0xff)])}',
+        '9223372036854775807',
+      );
+      expect(
+        '${codec.decode([0x3b, 0x7f, ...List.filled(7, 0xff)])}',
+        '-9223372036854775808',
       );
     });
 
-    test('epoch datetimes keep whole seconds exact', () {
-      // 1(1000000000001)
-      expect(
-        codec.decode([0xc1, 0x1b, 0, 0, 0, 0xe8, 0xd4, 0xa5, 0x10, 0x01]),
-        const SurrealDateTime(1000000000001, 0),
-      );
-      expect(codec.decode([0xc1, 0x20]), const SurrealDateTime(-1, 0));
-      // 1(1.5) and 1(-1.5)
-      expect(codec.decode([0xc1, 0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]),
-          const SurrealDateTime(1, 500000000));
-      expect(codec.decode([0xc1, 0xfb, 0xbf, 0xf8, 0, 0, 0, 0, 0, 0]),
-          const SurrealDateTime(-2, 500000000));
+    test('integers beyond 64 bits are refused', () {
+      expect(() => codec.decode([0x1b, ...List.filled(8, 0xff)]),
+          throwsFormatException);
+      expect(() => codec.decode([0x3b, 0x80, ...List.filled(7, 0)]),
+          throwsFormatException);
+    });
+
+    test('tags the server refuses are refused', () {
+      for (final bytes in [
+        [0xc0, 0x60], // 0(""): a datetime as text
+        [0xc1, 0x00], // 1(0): an epoch datetime
+        [0xc2, 0x40], // 2(h''): a bignum
+        [0xc9, 0x60], // 9(""): a uuid as text
+        [0xcd, 0x60], // 13(""): a duration as text
+        [0xd8, 0x63, 0xf6], // 99(null): unknown
+      ]) {
+        expect(() => codec.decode(bytes), throwsFormatException,
+            reason: '$bytes');
+      }
     });
 
     test('floats of every width', () {

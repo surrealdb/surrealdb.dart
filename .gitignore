@@ -10,3 +10,6 @@ pubspec.lock
 # Coverage
 coverage/
 .test_coverage.dart
+
+# Fetched by tool/fetch_conformance_vectors.sh, not committed
+test/conformance/vectors/
