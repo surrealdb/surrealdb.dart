@@ -63,3 +63,46 @@ jobs:
         # The test files share one database, so run them one at a time to
         # avoid write conflicts between them.
         run: dart test --concurrency=1 test/integration
+
+  # The shared conformance scenarios from surrealdb-protocol, run through the
+  # SDK by tool/conformance_driver.dart. The runner starts its own server for
+  # each set of flags a scenario needs.
+  conformance:
+    name: conformance (${{ matrix.surrealdb }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        surrealdb: [v3.3.4, nightly]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: surrealdb/surrealdb-protocol
+          ref: v0.14.0
+          path: surrealdb-protocol
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install surreal
+        run: |
+          curl -fsSL "https://download.surrealdb.com/${{ matrix.surrealdb }}/surreal-${{ matrix.surrealdb }}.linux-amd64.tgz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "SURREAL_BIN=$RUNNER_TEMP/surreal" >>"$GITHUB_ENV"
+      - name: Build the driver
+        run: |
+          dart pub get
+          version=$(sed -n 's/^version: *//p' pubspec.yaml)
+          dart compile exe -DSDK_VERSION="$version" tool/conformance_driver.dart \
+            -o "$RUNNER_TEMP/conformance_driver"
+      - name: Run the scenarios
+        working-directory: surrealdb-protocol
+        run: |
+          bun install --frozen-lockfile
+          bun conformance/runner/cli.ts --driver "$RUNNER_TEMP/conformance_driver" \
+            --report "$RUNNER_TEMP/conformance.json"
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-${{ matrix.surrealdb }}
+          path: ${{ runner.temp }}/conformance.json

@@ -23,8 +23,9 @@ web, and desktop), since it depends only on portable packages.
   replayed after a WebSocket reconnect, and kept by the client over HTTP.
 - Native data types: `RecordId`, `StringRecordId`, `Table`, `Range`, `Uuid`,
   `Decimal`, `SurrealDuration`, `SurrealDateTime`, `SurrealFuture`, `FileRef`,
-  the geometry types, Dart `Set`s, and `none` for NONE (distinct from `null`,
-  which is NULL), all carried losslessly through the CBOR codec.
+  the geometry types, Dart `Set`s, `none` for NONE (distinct from `null`,
+  which is NULL), and SurrealDB 4.0's sized numbers (`SizedInt` and
+  `SizedFloat`), all carried losslessly through the CBOR codec.
 - Record access, system user, and bearer authentication.
 - A standalone client for the Agent Memory API.
 
@@ -257,6 +258,12 @@ The format sets the WebSocket subprotocol and the HTTP content type. To plug in
 your own serialization, implement `SurrealCodec` and pass it as
 `ConnectOptions(codec: ...)`.
 
+With CBOR the driver asks for `cbor.2`, which a SurrealDB 4.0 server speaks and
+which adds the sized numbers. Over WebSocket it offers `cbor.2` before `cbor`;
+over HTTP it asks for `application/cbor; v=2` and sends it once the server has
+answered in it. A server before 4.0 answers in plain `cbor`, so the same client
+talks to both. `db.codec` says which one the connection speaks.
+
 ### Authentication
 
 ```dart
@@ -300,6 +307,19 @@ await db.create(const RecordId('event', 'launch'), {
   'where': const GeometryPoint(-0.118092, 51.509865),
 });
 ```
+
+SurrealDB 4.0 adds fixed-width numbers, `i8` to `u64`, `f16` and `f32`. Over
+`cbor.2` they keep their kind both ways, as `SizedInt` and `SizedFloat`:
+
+```dart
+await db.query(r'CREATE pixel SET r = $r', bindings: {'r': SizedInt.u8(255)});
+final [half] = await db.query('RETURN 1.5f16'); // SizedFloat.f16(1.5)
+```
+
+Over plain `cbor`, with a server before 4.0, they are sent as plain integers
+and floats (a `u64` beyond the 64-bit signed range as a `Decimal`), as the
+server widens them too. A `BigInt` beyond 64 bits is always sent as a
+`Decimal`, since SurrealDB integers are 64-bit.
 
 ## Flutter
 
@@ -345,8 +365,21 @@ Future<void> main() async {
 Run the unit tests, which need no server, on the VM and in Chrome:
 
 ```sh
-dart test test/cbor test/engine test/json test/memory test/value
+dart test test/cbor test/conformance test/engine test/json test/memory test/value
 dart test --platform chrome test/cbor test/engine test/json test/memory test/value
+```
+
+`test/conformance` runs the shared CBOR test vectors from [surrealdb-protocol](https://github.com/surrealdb/surrealdb-protocol) at the release named in `test/conformance/VERSION`. The vectors are not committed here: fetch them with `tool/fetch_conformance_vectors.sh` before running the tests, or the vector tests are skipped. The script checks them against `test/conformance/vectors.sha256`; given a new tag, it pins that release instead.
+
+`tool/conformance_driver.dart` runs the shared conformance scenarios from the
+same repository through the SDK. CI runs them against each supported server.
+To run them yourself, compile the driver and start the runner from a checkout
+of surrealdb-protocol (it needs [Bun](https://bun.sh) and a `surreal` binary):
+
+```sh
+dart compile exe tool/conformance_driver.dart -o build/conformance_driver
+cd ../surrealdb-protocol && bun install
+bun conformance/runner/cli.ts --driver "$OLDPWD/build/conformance_driver"
 ```
 
 Run the integration tests against a local server:
