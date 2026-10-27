@@ -93,6 +93,16 @@ class Surreal {
   Future<void> connect(String url,
       {ConnectOptions options = const ConnectOptions()}) async {
     if (_engine != null) await close();
+    try {
+      await _connectEngine(url, options);
+    } catch (_) {
+      // Do not leave a half opened connection behind when setup fails.
+      await close();
+      rethrow;
+    }
+  }
+
+  Future<void> _connectEngine(String url, ConnectOptions options) async {
     final uri = Uri.parse(url);
     _httpClient = http.Client();
     final engine = _engineFor(uri, options);
