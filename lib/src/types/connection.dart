@@ -1,7 +1,6 @@
-import 'dart:math';
-
 import '../protocol/codec.dart';
 import 'auth.dart';
+import 'dart:math';
 
 /// The lifecycle states a connection moves through.
 enum ConnectionStatus {
