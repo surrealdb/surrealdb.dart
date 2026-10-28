@@ -127,7 +127,18 @@ final class SurrealDuration extends SurrealValue {
   /// The compact tuple form used by the CBOR codec: an empty list for a zero
   /// duration, `[seconds]` when there is no nanosecond remainder, otherwise
   /// `[seconds, nanoseconds]`.
+  ///
+  /// SurrealDB durations are unsigned - the server reads tag 14 as
+  /// `[u64, u32]` - so a negative duration has no wire form and throws here
+  /// rather than being sent as a negative integer the server would refuse.
   List<int> toCompact() {
+    if (isNegative) {
+      throw ArgumentError.value(
+        toString(),
+        'duration',
+        'SurrealDB durations cannot be negative',
+      );
+    }
     if (seconds == 0 && nanoseconds == 0) return const [];
     if (nanoseconds == 0) return [seconds];
     return [seconds, nanoseconds];

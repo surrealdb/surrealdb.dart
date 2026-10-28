@@ -128,6 +128,23 @@ void main() {
       expect(value.toString(), '-1ns');
     });
 
+    test('a negative duration has no wire form', () {
+      // The server reads tag 14 as [u64, u32], so a negative duration cannot
+      // be sent; it is refused here rather than on the server.
+      for (final value in [
+        SurrealDuration.fromDart(const Duration(milliseconds: -1500)),
+        SurrealDuration.nanoseconds(-1),
+        SurrealDuration.weeks(-3),
+      ]) {
+        expect(value.toCompact, throwsArgumentError);
+      }
+
+      expect(const SurrealDuration().toCompact(), isEmpty);
+      expect(SurrealDuration.fromSeconds(90).toCompact(), [90]);
+      expect(
+          SurrealDuration.nanoseconds(1500000000).toCompact(), [1, 500000000]);
+    });
+
     test('a negative duration parses back from its string', () {
       for (final value in [
         SurrealDuration.fromDart(const Duration(milliseconds: -1500)),
