@@ -1,6 +1,6 @@
 import '../protocol/codec.dart';
 import 'auth.dart';
-import 'dart:math';
+import 'jitter.dart';
 
 /// The lifecycle states a connection moves through.
 enum ConnectionStatus {
@@ -50,18 +50,18 @@ class ReconnectOptions {
   /// `min(retryDelay * multiplier^attempt * (1 + jitter), retryDelayMax)`,
   /// where jitter is random in `[-retryDelayJitter, retryDelayJitter]`. This
   /// is the schedule the JavaScript SDK uses.
-  Duration delayForAttempt(int attempt, {Random? random}) {
+  ///
+  /// [random] stands in for the source of randomness, a number in `[-1, 1)`.
+  Duration delayForAttempt(int attempt, {double Function()? random}) {
     final jitter = retryDelayJitter == 0
         ? 0.0
-        : ((random ?? _random).nextDouble() * 2 - 1) * retryDelayJitter;
+        : (random ?? randomJitterFactor)() * retryDelayJitter;
     final scaled = retryDelay.inMilliseconds *
         _pow(retryDelayMultiplier, attempt) *
         (1 + jitter);
     final capped = scaled.clamp(0, retryDelayMax.inMilliseconds.toDouble());
     return Duration(milliseconds: capped.round());
   }
-
-  static final Random _random = Random();
 
   static double _pow(double base, int exponent) {
     var result = 1.0;

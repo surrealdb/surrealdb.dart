@@ -25,8 +25,9 @@ void main() {
     test('jitter varies the delay by at most the jitter fraction', () {
       const options = ReconnectOptions();
       final random = Random(1);
+      double next() => random.nextDouble() * 2 - 1;
       for (var i = 0; i < 100; i++) {
-        final ms = options.delayForAttempt(1, random: random).inMilliseconds;
+        final ms = options.delayForAttempt(1, random: next).inMilliseconds;
         expect(ms, inInclusiveRange(1800, 2200));
       }
     });
