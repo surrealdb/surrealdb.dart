@@ -19,7 +19,7 @@ class HttpEngine implements Engine {
   HttpEngine(
     SurrealCodec codec, {
     http.Client? client,
-    Duration? requestTimeout = const Duration(seconds: 30),
+    Duration? requestTimeout,
   })  : _codec = codec,
         _protocol = RpcProtocol(codec),
         _client = client ?? http.Client(),

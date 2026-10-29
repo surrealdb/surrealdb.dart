@@ -66,7 +66,7 @@ class ConnectOptions {
     this.reconnect = const ReconnectOptions(),
     this.versionCheck = true,
     this.timeout = const Duration(seconds: 30),
-    this.requestTimeout = const Duration(seconds: 30),
+    this.requestTimeout,
     this.format = SurrealFormat.cbor,
     this.codec,
   });
@@ -93,7 +93,14 @@ class ConnectOptions {
   final Duration timeout;
 
   /// How long to wait for the reply to a single request before failing it
-  /// with a [RequestTimeoutError]. Null waits indefinitely.
+  /// with a [RequestTimeoutError]. Null, the default, waits for as long as the
+  /// server takes.
+  ///
+  /// This is a client side limit: it stops the SDK from waiting, and nothing
+  /// more. The server is not told, and may well carry on and apply a write the
+  /// SDK has stopped waiting for. To have the server stop a query itself, use
+  /// the `TIMEOUT` clause. It does not limit opening the connection, which
+  /// [timeout] does.
   final Duration? requestTimeout;
 
   /// The serialization format. Defaults to CBOR, which carries the SurrealDB

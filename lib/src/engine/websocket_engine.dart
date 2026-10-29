@@ -17,7 +17,7 @@ class WebSocketEngine implements Engine {
   WebSocketEngine(
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
-    Duration? requestTimeout = const Duration(seconds: 30),
+    Duration? requestTimeout,
   })  : _codec = codec,
         _protocol = RpcProtocol(codec),
         _reconnect = reconnect,
