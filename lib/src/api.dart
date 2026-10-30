@@ -112,12 +112,18 @@ final class ApiResponse {
   const ApiResponse({required this.status, this.headers = const {}, this.body});
 
   factory ApiResponse._from(Object? result) {
-    final map = result is Map ? result : const {};
-    final status = map['status'];
-    final headers = map['headers'];
-    final body = map['body'];
+    // `api::invoke` always gives a response with a status, also for a route
+    // that does not exist. Anything else is not one, and is not taken for a
+    // success.
+    if (result is! Map || result['status'] is! int) {
+      throw ResponseError(
+          'The API response has no status, got ${result.runtimeType}');
+    }
+    final status = result['status'] as int;
+    final headers = result['headers'];
+    final body = result['body'];
     return ApiResponse(
-      status: status is int ? status : 200,
+      status: status,
       headers: headers is Map
           ? {
               for (final e in headers.entries)
