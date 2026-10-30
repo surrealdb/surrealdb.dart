@@ -131,7 +131,12 @@ class WebSocketEngine implements Engine {
     _timeout = timeout;
     _intentionalClose = false;
     _setStatus(ConnectionStatus.connecting);
-    await _connect();
+    try {
+      await _connect();
+    } catch (_) {
+      _setStatus(ConnectionStatus.disconnected);
+      rethrow;
+    }
     _setStatus(ConnectionStatus.connected);
   }
 

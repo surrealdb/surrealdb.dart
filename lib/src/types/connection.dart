@@ -1,6 +1,7 @@
 import '../errors.dart';
 import '../protocol/codec.dart';
 import 'auth.dart';
+import 'jitter.dart';
 
 /// The lifecycle states a connection moves through.
 enum ConnectionStatus {
@@ -16,8 +17,9 @@ class ReconnectOptions {
     this.enabled = true,
     this.attempts = 5,
     this.retryDelay = const Duration(seconds: 1),
-    this.retryDelayMax = const Duration(seconds: 30),
+    this.retryDelayMax = const Duration(seconds: 60),
     this.retryDelayMultiplier = 2.0,
+    this.retryDelayJitter = 0.1,
   });
 
   /// Disables automatic reconnection.
@@ -30,7 +32,9 @@ class ReconnectOptions {
   /// retry without limit.
   final int attempts;
 
-  /// The delay before the first retry.
+  /// The base delay. Attempt `n` waits `retryDelay * multiplier^n`, so the
+  /// first retry already waits `retryDelay * multiplier`, as in the
+  /// JavaScript SDK.
   final Duration retryDelay;
 
   /// The cap applied to the growing retry delay.
@@ -39,10 +43,23 @@ class ReconnectOptions {
   /// The factor the delay is multiplied by after each failed attempt.
   final double retryDelayMultiplier;
 
-  /// The delay to wait before the given attempt, starting at attempt 1.
-  Duration delayForAttempt(int attempt) {
-    final scaled =
-        retryDelay.inMilliseconds * _pow(retryDelayMultiplier, attempt - 1);
+  /// The fraction by which each delay is randomly varied, up or down, so
+  /// clients that lost the same server do not all retry together.
+  final double retryDelayJitter;
+
+  /// The delay to wait before the given attempt, starting at attempt 1:
+  /// `min(retryDelay * multiplier^attempt * (1 + jitter), retryDelayMax)`,
+  /// where jitter is random in `[-retryDelayJitter, retryDelayJitter]`. This
+  /// is the schedule the JavaScript SDK uses.
+  ///
+  /// [random] stands in for the source of randomness, a number in `[-1, 1)`.
+  Duration delayForAttempt(int attempt, {double Function()? random}) {
+    final jitter = retryDelayJitter == 0
+        ? 0.0
+        : (random ?? randomJitterFactor)() * retryDelayJitter;
+    final scaled = retryDelay.inMilliseconds *
+        _pow(retryDelayMultiplier, attempt) *
+        (1 + jitter);
     final capped = scaled.clamp(0, retryDelayMax.inMilliseconds.toDouble());
     return Duration(milliseconds: capped.round());
   }
