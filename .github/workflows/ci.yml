@@ -96,13 +96,21 @@ jobs:
             -o "$RUNNER_TEMP/conformance_driver"
       - name: Run the scenarios
         working-directory: surrealdb-protocol
+        # The driver speaks cbor.2 to a server that offers it, which keeps
+        # sized numbers sized, so the scenario that expects them widened runs
+        # separately over plain cbor.
+        env:
+          PLAIN_CBOR: query-sized-numbers-widen-over-plain-cbor
         run: |
           bun install --frozen-lockfile
           bun conformance/runner/cli.ts --driver "$RUNNER_TEMP/conformance_driver" \
-            --report "$RUNNER_TEMP/conformance.json"
+            --filter "^(?!$PLAIN_CBOR$)" --report "$RUNNER_TEMP/conformance.json"
+          CONFORMANCE_CBOR=cbor bun conformance/runner/cli.ts \
+            --driver "$RUNNER_TEMP/conformance_driver" \
+            --filter "^$PLAIN_CBOR$" --report "$RUNNER_TEMP/conformance-cbor.json"
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-${{ matrix.surrealdb }}
-          path: ${{ runner.temp }}/conformance.json
+          path: ${{ runner.temp }}/conformance*.json

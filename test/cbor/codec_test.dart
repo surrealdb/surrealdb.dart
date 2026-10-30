@@ -82,8 +82,7 @@ void main() {
       // the whole point of StringRecordId.
       expect(codec.encode(const StringRecordId('person:1')),
           [0xc8, 0x68, ...'person:1'.codeUnits]);
-      expect(codec.encode(const RecordId('person', '1')).take(2),
-          [0xc8, 0x82]);
+      expect(codec.encode(const RecordId('person', '1')).take(2), [0xc8, 0x82]);
     });
 
     test('Uuid', () {
