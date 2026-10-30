@@ -1,5 +1,7 @@
+import '../errors.dart';
 import '../protocol/codec.dart';
 import 'auth.dart';
+import 'jitter.dart';
 
 /// The lifecycle states a connection moves through.
 enum ConnectionStatus {
@@ -15,8 +17,9 @@ class ReconnectOptions {
     this.enabled = true,
     this.attempts = 5,
     this.retryDelay = const Duration(seconds: 1),
-    this.retryDelayMax = const Duration(seconds: 30),
+    this.retryDelayMax = const Duration(seconds: 60),
     this.retryDelayMultiplier = 2.0,
+    this.retryDelayJitter = 0.1,
   });
 
   /// Disables automatic reconnection.
@@ -29,7 +32,9 @@ class ReconnectOptions {
   /// retry without limit.
   final int attempts;
 
-  /// The delay before the first retry.
+  /// The base delay. Attempt `n` waits `retryDelay * multiplier^n`, so the
+  /// first retry already waits `retryDelay * multiplier`, as in the
+  /// JavaScript SDK.
   final Duration retryDelay;
 
   /// The cap applied to the growing retry delay.
@@ -38,10 +43,23 @@ class ReconnectOptions {
   /// The factor the delay is multiplied by after each failed attempt.
   final double retryDelayMultiplier;
 
-  /// The delay to wait before the given attempt, starting at attempt 1.
-  Duration delayForAttempt(int attempt) {
-    final scaled =
-        retryDelay.inMilliseconds * _pow(retryDelayMultiplier, attempt - 1);
+  /// The fraction by which each delay is randomly varied, up or down, so
+  /// clients that lost the same server do not all retry together.
+  final double retryDelayJitter;
+
+  /// The delay to wait before the given attempt, starting at attempt 1:
+  /// `min(retryDelay * multiplier^attempt * (1 + jitter), retryDelayMax)`,
+  /// where jitter is random in `[-retryDelayJitter, retryDelayJitter]`. This
+  /// is the schedule the JavaScript SDK uses.
+  ///
+  /// [random] stands in for the source of randomness, a number in `[-1, 1)`.
+  Duration delayForAttempt(int attempt, {double Function()? random}) {
+    final jitter = retryDelayJitter == 0
+        ? 0.0
+        : (random ?? randomJitterFactor)() * retryDelayJitter;
+    final scaled = retryDelay.inMilliseconds *
+        _pow(retryDelayMultiplier, attempt) *
+        (1 + jitter);
     final capped = scaled.clamp(0, retryDelayMax.inMilliseconds.toDouble());
     return Duration(milliseconds: capped.round());
   }
@@ -62,9 +80,13 @@ class ConnectOptions {
     this.database,
     this.authentication,
     this.token,
+    this.refreshToken,
+    this.renewTokens = true,
+    this.tokenExpiryMargin = const Duration(seconds: 60),
     this.reconnect = const ReconnectOptions(),
     this.versionCheck = true,
     this.timeout = const Duration(seconds: 30),
+    this.requestTimeout,
     this.format = SurrealFormat.cbor,
     this.codec,
   });
@@ -81,14 +103,42 @@ class ConnectOptions {
   /// An existing token to authenticate with once connected.
   final String? token;
 
+  /// The refresh token issued with [token], used to refresh the session when
+  /// [token] has expired and before it expires.
+  final String? refreshToken;
+
+  /// Whether to renew the session's access token before it expires: with
+  /// its refresh token when there is one, otherwise by signing in again with
+  /// [authentication]. Tokens without an expiry are never renewed. A
+  /// session with no refresh token, and no credentials to sign in again
+  /// with while this is on, is signed out when its access token expires.
+  final bool renewTokens;
+
+  /// How long before the access token expires to renew it. When the token
+  /// lives for less than twice this, it is renewed halfway through instead.
+  final Duration tokenExpiryMargin;
+
   /// How to behave when the connection drops.
   final ReconnectOptions reconnect;
 
-  /// Whether to check the server version after connecting.
+  /// Whether to check the server version straight after connecting. An
+  /// unsupported version closes the connection and fails `connect` with
+  /// an `UnsupportedVersionError`.
   final bool versionCheck;
 
   /// How long to wait for the connection to be established.
   final Duration timeout;
+
+  /// How long to wait for the reply to a single request before failing it
+  /// with a [RequestTimeoutError]. Null, the default, waits for as long as the
+  /// server takes.
+  ///
+  /// This is a client side limit: it stops the SDK from waiting, and nothing
+  /// more. The server is not told, and may well carry on and apply a write the
+  /// SDK has stopped waiting for. To have the server stop a query itself, use
+  /// the `TIMEOUT` clause. It does not limit opening the connection, which
+  /// [timeout] does.
+  final Duration? requestTimeout;
 
   /// The serialization format. Defaults to CBOR, which carries the SurrealDB
   /// types without loss. Ignored when [codec] is set.

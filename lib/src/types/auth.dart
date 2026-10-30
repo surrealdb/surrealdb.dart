@@ -162,6 +162,22 @@ final class AccessRecordAuth extends AnyAuth {
 class Tokens {
   const Tokens({required this.access, this.refresh});
 
+  /// The access token, sent with every request.
   final String access;
+
+  /// The refresh token, which can be exchanged once for new tokens.
   final String? refresh;
+
+  /// The wire form used by `refresh` and `revoke`.
+  Map<String, Object?> toJson() => {
+        'access': access,
+        if (refresh != null) 'refresh': refresh,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is Tokens && other.access == access && other.refresh == refresh;
+
+  @override
+  int get hashCode => Object.hash(access, refresh);
 }

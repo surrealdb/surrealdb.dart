@@ -3,26 +3,47 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'cbor/codec.dart';
 import 'engine/engine.dart';
 import 'engine/http_engine.dart';
+import 'engine/session_state.dart';
 import 'engine/websocket_engine.dart';
 import 'errors.dart';
+import 'internal/jwt.dart';
 import 'live_query.dart';
+import 'protocol/codec.dart';
 import 'protocol/codecs.dart';
 import 'types/auth.dart';
 import 'types/connection.dart';
+import 'types/export.dart';
 import 'types/live.dart';
 import 'types/patch.dart';
+import 'types/query_frame.dart';
 import 'value/value.dart';
 
-/// The minimum SurrealDB server version this client targets.
-const String _minimumVersion = '1.4.2';
+part 'api.dart';
+part 'queryable.dart';
+part 'renewal.dart';
+part 'session.dart';
+part 'transaction.dart';
+
+/// The lowest SurrealDB server version this client accepts.
+const String minimumServerVersion = '1.4.2';
+
+/// The first SurrealDB server version this client no longer accepts.
+const String maximumServerVersion = '5.0.0';
 
 class _LiveRegistration {
-  _LiveRegistration(this.query, this.resource, this.diff);
+  _LiveRegistration(this.query, this.session, this.resource, this.diff);
 
   final LiveQuery query;
-  final Object resource;
+
+  /// The attached session the query runs in, or null for the default one.
+  final Uuid? session;
+
+  /// What the live query selects from, or null for a query attached with
+  /// `liveOf`, which the client cannot restart.
+  final Object? resource;
   final bool diff;
 }
 
@@ -33,6 +54,9 @@ class _LiveRegistration {
 /// are returned as [LiveQuery] handles whose change notifications arrive on a
 /// [Stream].
 ///
+/// The client is the connection's default session. Over WebSocket, more
+/// sessions can share the connection: see [newSession] and [forkSession].
+///
 /// ```dart
 /// final db = Surreal();
 /// await db.connect('ws://127.0.0.1:8000/rpc');
@@ -40,42 +64,97 @@ class _LiveRegistration {
 /// await db.signin(const RootAuth(username: 'root', password: 'root'));
 /// final created = await db.create('person', {'name': 'Tobie'});
 /// ```
-class Surreal {
+class Surreal with SurrealQueryable, SurrealSessionMethods {
   Engine? _engine;
   Uri? _url;
-  final http.Client _httpClient = http.Client();
+  http.Client? _httpClient;
+  StreamSubscription<ConnectionStatus>? _statusSubscription;
+  final _statusController = StreamController<ConnectionStatus>.broadcast();
+  ConnectionStatus? _publishedStatus;
 
-  String? _namespace;
-  String? _database;
-  String? _accessToken;
+  late final SessionState _session = SessionState()
+    ..onTokensChanged = _onTokensChanged;
   String? _version;
+  SurrealCodec _codec = const CborCodec();
+  var _versionCheck = true;
+
+  /// Whether the codec is the built-in one for the format, rather than one
+  /// the caller supplied.
+  var _ownCodec = true;
+
+  // Token renewal.
+  var _renewTokens = true;
+  var _tokenExpiryMargin = const Duration(seconds: 60);
+  @override
+  late final _TokenRenewal _renewal =
+      _TokenRenewal(this, _session, null, onError: (error, stackTrace) {
+    if (!_authController.isClosed) _authController.addError(error, stackTrace);
+  });
+  final _authController = StreamController<Tokens?>.broadcast();
 
   final Map<String, _LiveRegistration> _liveByUuid = {};
   StreamSubscription<LiveMessage>? _liveSubscription;
 
-  /// The namespace currently selected, if any.
-  String? get namespace => _namespace;
+  /// The sessions attached to the connection, by id.
+  final Map<Uuid, SurrealSession> _attached = {};
 
-  /// The database currently selected, if any.
-  String? get database => _database;
+  @override
+  Surreal get _client => this;
 
-  /// The access token in use, if the session is authenticated.
-  String? get accessToken => _accessToken;
+  /// Set once the server has refused `query_stream`.
+  var _streamingUnsupported = false;
+
+  /// Whether `queryStream` can stream: over WebSocket, against SurrealDB 3.3
+  /// or later. An unknown version is tried, and remembered if refused.
+  bool get _canStream {
+    final engine = _engine;
+    if (engine == null || !engine.supportsStreaming) return false;
+    if (_streamingUnsupported) return false;
+    final version = _version == null ? null : _parseVersion(_version!);
+    return version == null || _compareVersions(version, const [3, 3, 0]) >= 0;
+  }
+
+  @override
+  Uuid? get _sessionId => null;
+
+  @override
+  SessionState get _state => _session;
+
+  /// Emits the new [tokens] whenever they change: after signing in, a
+  /// refresh, an automatic renewal or a reconnect that had to refresh. Emits
+  /// null when the session loses its authentication. A failed automatic
+  /// renewal is delivered as an error.
+  Stream<Tokens?> get authChanges => _authController.stream;
 
   /// The server version, available after [connect] with a version check or a
   /// call to [version].
   String? get serverVersion => _version;
 
+  /// The codec the connection speaks, or null when not connected. With CBOR
+  /// this is a [CborCodec] whose [CborCodec.sizedNumbers] says whether the
+  /// server negotiated `cbor.2`, which a 4.0 server does: over WebSocket at
+  /// connect, over HTTP with its first reply.
+  SurrealCodec? get codec => _engine?.codec;
+
   /// The current connection status.
-  ConnectionStatus get status =>
-      _engine?.status ?? ConnectionStatus.disconnected;
+  ConnectionStatus get status {
+    final status = _engine?.status ?? ConnectionStatus.disconnected;
+    return _verifying && status == ConnectionStatus.connected
+        ? ConnectionStatus.connecting
+        : status;
+  }
+
+  /// Whether [connect] is still checking the server, so the connection is
+  /// not yet reported as connected.
+  var _verifying = false;
 
   /// Whether there is an open connection.
   bool get isConnected => status == ConnectionStatus.connected;
 
-  /// Emits whenever the connection status changes.
-  Stream<ConnectionStatus> get statusChanges =>
-      _engine?.statusChanges ?? const Stream.empty();
+  /// Emits whenever the connection status changes. The stream outlives any
+  /// single connection, so a listener keeps receiving updates across [close]
+  /// and a later [connect].
+  Stream<ConnectionStatus> get statusChanges => _statusController.stream;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -83,71 +162,163 @@ class Surreal {
 
   /// Connects to the server at [url]. The scheme selects the engine: `ws` and
   /// `wss` use the WebSocket engine, `http` and `https` use the HTTP engine.
+  ///
+  /// Calling [connect] on a client that is already connected closes the
+  /// existing connection first. A client can be connected again after [close].
   Future<void> connect(String url,
       {ConnectOptions options = const ConnectOptions()}) async {
+    if (_engine != null) await close();
+    try {
+      await _connectEngine(url, options);
+    } catch (_) {
+      // Do not leave a half opened connection behind when setup fails.
+      await close();
+      rethrow;
+    }
+  }
+
+  Future<void> _connectEngine(String url, ConnectOptions options) async {
     final uri = Uri.parse(url);
+    _httpClient = http.Client();
     final engine = _engineFor(uri, options);
     _engine = engine;
     _url = uri;
+    _versionCheck = options.versionCheck;
+    engine.onVerify = _verifyServer;
     engine.onReconnect = _restartLiveQueries;
+    engine.onAuthenticationLost = _signInAgain;
+    _renewTokens = options.renewTokens;
+    _tokenExpiryMargin = options.tokenExpiryMargin;
     _liveSubscription = engine.liveNotifications.listen(_routeLive);
+    _statusSubscription = engine.statusChanges.listen(_publishStatus);
 
-    await engine.open(uri, timeout: options.timeout);
-
+    _ownCodec = options.codec == null;
+    // Until the version is known, sets go as arrays, which every server takes.
+    _adaptCodec();
+    // The server is checked before anyone is told the connection is open.
+    _verifying = options.versionCheck;
+    try {
+      await engine.open(uri, timeout: options.timeout);
+      if (options.versionCheck) await _checkVersion();
+    } catch (_) {
+      _verifying = false;
+      await close();
+      rethrow;
+    }
+    _verifying = false;
+    _publishStatus(engine.status);
     if (options.namespace != null || options.database != null) {
-      await use(namespace: options.namespace, database: options.database);
+      await use(
+        namespace: options.namespace ?? _unchanged,
+        database: options.database ?? _unchanged,
+      );
     }
-    if (options.authentication != null) {
-      await signin(options.authentication!);
+    final credentials = options.authentication;
+    if (credentials != null) {
+      // Without a refresh token, renewal signs in again with these.
+      final params = _renewal.credentials = _copyOf(credentials.toJson());
+      await _rpc('signin', [params]);
     } else if (options.token != null) {
-      await authenticate(options.token!);
-    }
-    if (options.versionCheck) {
-      await _checkVersion();
+      await authenticate(options.token!, refreshToken: options.refreshToken);
     }
   }
 
   Engine _engineFor(Uri uri, ConnectOptions options) {
-    final codec = options.codec ?? codecForFormat(options.format);
+    final codec = _codec = options.codec ?? codecForFormat(options.format);
     switch (uri.scheme) {
       case 'ws':
       case 'wss':
-        return WebSocketEngine(codec, reconnect: options.reconnect);
+        return WebSocketEngine(
+          codec,
+          reconnect: options.reconnect,
+          requestTimeout: options.requestTimeout,
+          session: _session,
+        );
       case 'http':
       case 'https':
-        return HttpEngine(codec, client: _httpClient);
+        return HttpEngine(
+          codec,
+          client: _httpClient!,
+          requestTimeout: options.requestTimeout,
+          session: _session,
+        );
       default:
         throw UnsupportedEngineError(uri.scheme);
     }
   }
 
   /// Closes the connection and releases resources. Active live queries are
-  /// closed.
+  /// closed. The client can be connected again with [connect].
   Future<void> close() async {
     await _liveSubscription?.cancel();
     _liveSubscription = null;
-    for (final reg in _liveByUuid.values) {
+    final registrations = List.of(_liveByUuid.values);
+    _liveByUuid.clear();
+    for (final reg in registrations) {
       await reg.query.dispose();
     }
-    _liveByUuid.clear();
-    await _engine?.close();
-    _httpClient.close();
+    for (final session in _attached.values) {
+      session._closed = true;
+      session._renewal.stop();
+    }
+    _attached.clear();
+    final engine = _engine;
     _engine = null;
+    try {
+      await engine?.close();
+    } finally {
+      await _statusSubscription?.cancel();
+      _statusSubscription = null;
+      // The engine's own event may not have been forwarded before the
+      // subscription was cancelled; publishing only changes sends it once.
+      if (engine != null) _publishStatus(ConnectionStatus.disconnected);
+      _httpClient?.close();
+      _httpClient = null;
+      _session.clear(cleared: false);
+      _renewal.cancel();
+      _version = null;
+      _streamingUnsupported = false;
+    }
+  }
+
+  void _publishStatus(ConnectionStatus status) {
+    if (_verifying && status == ConnectionStatus.connected) return;
+    if (status == _publishedStatus) return;
+    _publishedStatus = status;
+    _statusController.add(status);
   }
 
   /// Returns the server version string, for example `2.1.0`.
   Future<String> version() async {
-    final result = await _rpc('version');
-    final version =
-        result is Map ? result['version']?.toString() : result?.toString();
+    final version = _versionOf(await _rpc('version', const []));
     _version = version;
+    _adaptCodec();
     return version ?? '';
   }
+
+  /// Encodes sets as SurrealDB sets only for a server known to be 3.0 or
+  /// later. Older servers have no set type and reject its CBOR tag, so sets
+  /// go to them, and to a server whose version is not known, as arrays. A
+  /// codec given in [ConnectOptions.codec] is left as it is.
+  void _adaptCodec() {
+    final engine = _engine;
+    if (engine == null || !_ownCodec) return;
+    final codec = engine.codec;
+    if (codec is! CborCodec) return;
+    final major = _parseVersion(_version ?? '')?.first;
+    final arrays = major == null || major < 3;
+    if (codec.setsAsArrays != arrays) {
+      engine.codec = codec.copyWith(setsAsArrays: arrays);
+    }
+  }
+
+  static String? _versionOf(Object? result) =>
+      result is Map ? result['version']?.toString() : result?.toString();
 
   /// Checks that the server is reachable and healthy. Throws on failure.
   Future<void> health() async {
     final base = _httpBase();
-    final response = await _httpClient.get(base.replace(path: '/health'));
+    final response = await _http.get(base.replace(path: '/health'));
     if (response.statusCode != 200) {
       throw HttpConnectionError(
         'Health check failed with status ${response.statusCode}',
@@ -156,205 +327,249 @@ class Surreal {
     }
   }
 
+  /// Fails with [UnsupportedVersionError] unless the server version is at
+  /// least [minimumServerVersion] and below [maximumServerVersion]. A
+  /// pre-release counts as its release, so `5.0.0-alpha` is rejected and
+  /// `3.4.0-nightly` is accepted.
   Future<void> _checkVersion() async {
     final version = await this.version();
-    final parts = version.split('.');
-    if (parts.isEmpty) return;
-    final major = int.tryParse(parts.first.replaceAll(RegExp(r'[^0-9]'), ''));
-    if (major != null && major < 1) {
-      throw UnsupportedVersionError(version, _minimumVersion);
+    if (!isSupportedServerVersion(version)) {
+      throw UnsupportedVersionError(
+          version, minimumServerVersion, maximumServerVersion);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Session
-  // ---------------------------------------------------------------------------
-
-  /// Selects the [namespace] and [database] for subsequent operations. A value
-  /// left null keeps the currently selected one.
-  Future<void> use({String? namespace, String? database}) async {
-    final ns = namespace ?? _namespace;
-    final db = database ?? _database;
-    await _rpc('use', [ns, db]);
-    _namespace = ns;
-    _database = db;
-  }
-
-  /// Signs up a new record access user and returns the issued tokens.
-  Future<Tokens> signup(AccessRecordAuth auth) async {
-    final result = await _rpc('signup', [auth.toJson()]);
-    final tokens = _tokensFrom(result);
-    _accessToken = tokens.access;
-    return tokens;
-  }
-
-  /// Signs in with the given credentials and returns the issued tokens.
-  Future<Tokens> signin(AnyAuth auth) async {
-    final result = await _rpc('signin', [auth.toJson()]);
-    final tokens = _tokensFrom(result);
-    _accessToken = tokens.access;
-    return tokens;
-  }
-
-  /// Authenticates the current session with an existing token.
-  Future<void> authenticate(String token) async {
-    await _rpc('authenticate', [token]);
-    _accessToken = token;
-  }
-
-  /// Invalidates the current session, signing out.
-  Future<void> invalidate() async {
-    await _rpc('invalidate');
-    _accessToken = null;
-  }
-
-  /// Returns the record associated with the current authentication, or null.
-  Future<Map<String, dynamic>?> info() async {
-    final result = await _rpc('info');
-    return result as Map<String, dynamic>?;
-  }
-
-  /// Defines a connection wide parameter that can be used in queries as `$key`.
-  Future<void> set(String key, Object? value) async {
-    await _rpc('let', [key, value]);
-  }
-
-  /// Removes a parameter previously defined with [set].
-  Future<void> unset(String key) async {
-    await _rpc('unset', [key]);
+  /// Runs when the WebSocket engine reconnects, before the session is
+  /// restored. The server behind the URL may have changed, so its version is
+  /// checked again. An unsupported server closes the client; any other
+  /// failure fails the attempt, which the engine tries again.
+  Future<void> _verifyServer(
+      Future<Object?> Function(String method, List<Object?> params)
+          call) async {
+    // The server behind the URL may have changed, so streaming is tried
+    // again.
+    _streamingUnsupported = false;
+    if (!_versionCheck) {
+      // The server may have changed, and its version is not checked, so
+      // forget the old one and send sets as arrays again.
+      _version = null;
+      _adaptCodec();
+      return;
+    }
+    final version = _versionOf(await call('version', const [])) ?? '';
+    _version = version;
+    // The session about to be replayed may hold sets.
+    _adaptCodec();
+    if (isSupportedServerVersion(version)) return;
+    final error = UnsupportedVersionError(
+        version, minimumServerVersion, maximumServerVersion);
+    for (final registration in List.of(_liveByUuid.values)) {
+      registration.query.emitError(error, StackTrace.current);
+    }
+    await close();
+    throw error;
   }
 
   // ---------------------------------------------------------------------------
-  // Query
+  // Sessions
   // ---------------------------------------------------------------------------
 
-  /// Runs a SurrealQL query and returns the result of each statement in order.
-  /// Throws a [QueryStatementError] if any statement fails.
-  ///
-  /// Bind parameters by referencing them as `$name` in [query] and passing the
-  /// values in [bindings].
-  Future<List<Object?>> query(String query,
-      {Map<String, Object?>? bindings}) async {
-    final statements = await queryRaw(query, bindings: bindings);
-    final results = <Object?>[];
-    for (final statement in statements) {
-      if (statement['status'] != 'OK') {
-        throw QueryStatementError(
-            statement['result']?.toString() ?? 'Query statement failed');
+  /// Whether a `use` call can carry NONE to keep a value. A JSON WebSocket
+  /// cannot; over HTTP the client applies `use` itself.
+  bool get _canSendNone {
+    final engine = _engine;
+    return engine is! WebSocketEngine || engine.codec is CborCodec;
+  }
+
+  /// Attaches a new, empty session to the connection: no namespace,
+  /// database, variables or authentication. See [SurrealSession].
+  Future<SurrealSession> newSession() => _attachSession();
+
+  /// The ids of the sessions attached to the connection, not counting the
+  /// default session. Includes sessions attached by other clients of the same
+  /// connection, if any.
+  Future<List<Uuid>> sessions() async {
+    _requireSessions('sessions');
+    final result = await _rpc('sessions', const []);
+    return [for (final id in result as List) _asUuid(id)];
+  }
+
+  Future<SurrealSession> _attachSession(
+      {SessionState? copyOf, Map<String, Object?>? credentials}) async {
+    final engine = _requireSessions('sessions');
+    final id = Uuid.v4();
+    final state = SessionState();
+    await _rpc('attach', const [], session: id);
+    engine.trackSession(id, state);
+    final session = SurrealSession._(this, id, state);
+    state.onTokensChanged = session._renewal.reschedule;
+    session._renewal.credentials = credentials;
+    _attached[id] = session;
+    if (copyOf != null) {
+      try {
+        for (final MapEntry(:key, :value) in copyOf.variables.entries) {
+          await _rpc('let', [key, value], session: id);
+        }
+        // The access token is shared, but not the refresh token: it can be
+        // used only once, so two sessions renewing with it would fail.
+        final token = copyOf.token;
+        if (token != null) {
+          try {
+            await _rpc('authenticate', [token], session: id);
+          } on ResponseError catch (error) {
+            // The token expired or was revoked. With the parent's
+            // credentials the fork signs in for its own, as a reconnect
+            // would.
+            if (!_renewTokens ||
+                credentials == null ||
+                !rejectsAuthentication(error)) {
+              rethrow;
+            }
+            await _rpc('signin', [credentials], session: id);
+          }
+        }
+        // Selected after authenticating, which selects what the token
+        // names, so that the parent's selection is the one that stays.
+        final namespace = copyOf.replayNamespace;
+        final database = copyOf.replayDatabase;
+        final nothing = namespace == null && database == null && token == null;
+        if ((namespace is! SurrealNone || database is! SurrealNone) &&
+            !nothing) {
+          await session._use(
+            namespace is SurrealNone ? _unchanged : namespace as String?,
+            database is SurrealNone ? _unchanged : database as String?,
+          );
+        }
+      } catch (_) {
+        try {
+          await session.close();
+        } catch (_) {
+          // Detach was refused too. Nothing else holds the session, so it
+          // is no longer tracked: it is not attached again after a
+          // reconnect, and goes when the connection closes.
+          await session._forget();
+        }
+        rethrow;
       }
-      results.add(statement['result']);
     }
-    return results;
+    return session;
   }
 
-  /// Runs a SurrealQL query and returns the raw status objects for each
-  /// statement, without throwing on a failed statement. Each entry has a
-  /// `status`, `time`, and `result`.
-  Future<List<Map<String, dynamic>>> queryRaw(String query,
-      {Map<String, Object?>? bindings}) async {
-    final result = await _rpc('query', [query, bindings ?? const {}]);
-    return (result as List).cast<Map<String, dynamic>>();
+  /// Runs when a reconnect finds a session's tokens rejected. With token
+  /// renewal on, signs the session in again with its credentials, if it has
+  /// any, and returns whether it did; otherwise it carries on without
+  /// authentication.
+  Future<bool> _signInAgain(
+      Uuid? session,
+      Object error,
+      Future<Object?> Function(String method, List<Object?> params)
+          call) async {
+    final renewal = session == null ? _renewal : _attached[session]?._renewal;
+    final credentials = renewal?.credentials;
+    if (!_renewTokens || renewal == null || credentials == null) return false;
+    try {
+      await call('signin', [credentials]);
+      return true;
+    } on ResponseError catch (error) {
+      // Credentials that no longer work stay rejected; anything else fails
+      // the attempt, which is tried again.
+      if (!rejectsAuthentication(error)) rethrow;
+      renewal.credentials = null;
+      return false;
+    }
   }
 
-  // ---------------------------------------------------------------------------
-  // CRUD
-  // ---------------------------------------------------------------------------
+  Engine _requireSessions(String feature) {
+    final engine = _engine;
+    if (engine == null) throw const ConnectionUnavailableError();
+    if (!engine.supportsSessions) throw UnsupportedFeatureError(feature);
+    return engine;
+  }
 
-  /// Selects records. A record id returns a single record or null, a table or
-  /// range returns a list.
-  Future<dynamic> select(Object resource) => _rpc('select', [_thing(resource)]);
+  /// A deep copy of [value], made by encoding and decoding it with the
+  /// codec requests are sent with.
+  Map<String, Object?> _copyOf(Map<String, Object?> value) {
+    final codec = _engine?.codec ?? const CborCodec();
+    return (codec.decode(codec.encode(value)) as Map).cast<String, Object?>();
+  }
 
-  /// Creates a record. [data] is the record content.
-  Future<dynamic> create(Object resource, [Object? data]) =>
-      _rpc('create', [_thing(resource), if (data != null) data]);
-
-  /// Inserts one record or a list of records into [table].
-  Future<dynamic> insert(Object table, Object data) =>
-      _rpc('insert', [_thing(table), data]);
-
-  /// Inserts one or more graph edges into [table].
-  Future<dynamic> insertRelation(Object table, Object data) =>
-      _rpc('insert_relation', [_thing(table), data]);
-
-  /// Replaces the content of the matching records with [data].
-  Future<dynamic> update(Object resource, Object data) =>
-      _rpc('update', [_thing(resource), data]);
-
-  /// Creates the record if it is missing, otherwise replaces its content.
-  Future<dynamic> upsert(Object resource, Object data) =>
-      _rpc('upsert', [_thing(resource), data]);
-
-  /// Merges [data] into the matching records, leaving other fields untouched.
-  Future<dynamic> merge(Object resource, Object data) =>
-      _rpc('merge', [_thing(resource), data]);
-
-  /// Applies a list of JSON Patch operations to the matching records. When
-  /// [diff] is true the server returns the applied patches instead of the
-  /// records.
-  Future<dynamic> patch(Object resource, List<Patch> patches,
-          {bool diff = false}) =>
-      _rpc('patch', [
-        _thing(resource),
-        [for (final patch in patches) patch.toJson()],
-        diff,
-      ]);
-
-  /// Deletes the matching records and returns them.
-  Future<dynamic> delete(Object resource) => _rpc('delete', [_thing(resource)]);
-
-  /// Creates a graph edge from [from] to [to] through the [edge] table or
-  /// record, optionally carrying [data].
-  Future<dynamic> relate(Object from, Object edge, Object to, [Object? data]) =>
-      _rpc('relate', [
-        _thing(from),
-        _thing(edge),
-        _thing(to),
-        if (data != null) data,
-      ]);
-
-  /// Runs a built in or user defined function and returns its result.
-  Future<dynamic> run(String name, {String? version, List<Object?>? args}) =>
-      _rpc('run', [name, version, args ?? const []]);
+  /// Reschedules renewal and tells listeners whenever the tokens change.
+  void _onTokensChanged() {
+    if (!_authController.isClosed) _authController.add(tokens);
+    _renewal.reschedule();
+  }
 
   // ---------------------------------------------------------------------------
   // Live queries
   // ---------------------------------------------------------------------------
 
-  /// Starts a live query on [resource] and returns a handle. Listen to the
-  /// handle's `stream` for change notifications. When [diff] is true, each
-  /// notification carries a set of JSON Patch operations instead of the record.
-  Future<LiveQuery> live(Object resource, {bool diff = false}) async {
-    final uuid = _asUuid(await _rpc('live', [_thing(resource), diff]));
-    final query = LiveQuery(uuid, _killLive);
-    _liveByUuid[uuid.toString()] = _LiveRegistration(query, resource, diff);
+  LiveQuery _registerLive(Uuid id, Uuid? session, Object? resource, bool diff) {
+    final query = LiveQuery(id, _killLive);
+    _liveByUuid[id.toString()] =
+        _LiveRegistration(query, session, resource, diff);
     return query;
   }
 
-  /// Stops the live query with the given [id].
-  Future<void> kill(Uuid id) async {
-    final registration = _liveByUuid.remove(id.toString());
-    await _rpc('kill', [id]);
-    await registration?.query.dispose();
+  Future<void> _killLive(LiveQuery query) async {
+    final registration = _liveByUuid[query.id.toString()];
+    // Sent in the session the query runs in, and forgotten only once the
+    // server has stopped it.
+    await _rpc('kill', [query.id], session: registration?.session);
+    _liveByUuid.remove(query.id.toString());
+    await query.dispose();
   }
 
-  Future<void> _killLive(LiveQuery query) async {
-    _liveByUuid.remove(query.id.toString());
-    await _rpc('kill', [query.id]);
-    await query.dispose();
+  /// Closes the streams of every live query of the given session, which the
+  /// server has already stopped.
+  Future<void> _disposeLiveQueries(Uuid? session) async {
+    final registrations = [
+      for (final entry in _liveByUuid.entries.toList())
+        if (entry.value.session == session) entry,
+    ];
+    for (final entry in registrations) {
+      _liveByUuid.remove(entry.key);
+      // Not awaited: a paused listener would hold up the rest.
+      unawaited(entry.value.query.dispose());
+    }
   }
 
   void _routeLive(LiveMessage message) {
     _liveByUuid[message.queryId.toString()]?.query.emit(message);
   }
 
+  /// Starts every registered live query again after a reconnect. Each query
+  /// is restarted on its own: one that fails keeps its registration, receives
+  /// the error on its stream, and is tried again on the next reconnect.
   Future<void> _restartLiveQueries() async {
-    final registrations = List.of(_liveByUuid.values);
-    _liveByUuid.clear();
-    for (final registration in registrations) {
-      final uuid = _asUuid(await _rpc('live', [
-        _thing(registration.resource),
-        registration.diff,
-      ]));
+    for (final entry in _liveByUuid.entries.toList()) {
+      final oldId = entry.key;
+      final registration = entry.value;
+      final resource = registration.resource;
+      if (resource == null) {
+        // Attached with liveOf, so there is nothing to restart it from.
+        _liveByUuid.remove(oldId);
+        registration.query.emitError(LiveQueryLostError(registration.query.id));
+        // Not awaited: a paused listener would hold up every other restart.
+        unawaited(registration.query.dispose());
+        continue;
+      }
+      final Uuid uuid;
+      try {
+        uuid = _asUuid(await _rpc(
+          'live',
+          [_thing(resource), registration.diff],
+          session: registration.session,
+        ));
+      } catch (error, stackTrace) {
+        registration.query.emitError(error, stackTrace);
+        continue;
+      }
+      if (_liveByUuid.remove(oldId) == null) {
+        // Killed while the restart was in flight, so stop the new query too.
+        unawaited(_rpc('kill', [uuid], session: registration.session)
+            .then((_) {}, onError: (_) {}));
+        continue;
+      }
       registration.query.rebind(uuid);
       _liveByUuid[uuid.toString()] = registration;
     }
@@ -364,30 +579,111 @@ class Surreal {
   // Import and export
   // ---------------------------------------------------------------------------
 
-  /// Imports a SurrealQL document into the current namespace and database.
+  /// Imports a SurrealQL document, such as one from [export], into the
+  /// current namespace and database, over the server's HTTP `/import`
+  /// endpoint. Works with either engine.
+  ///
+  /// The document must start with `OPTION IMPORT;`, as exports do. The
+  /// import is not atomic: statements run one by one, and those that fail do
+  /// not stop the rest. When any fail, this throws an [ImportError] listing
+  /// them, after the others have been applied. If the server's reply does
+  /// not say how the statements went, this throws a [ResponseError] rather
+  /// than report an import it could not check as complete.
   Future<void> import(String surql) async {
-    final response = await _httpClient.post(
+    final response = await _http.post(
       _httpBase().replace(path: '/import'),
-      headers: _httpHeaders(contentType: 'text/plain'),
+      headers:
+          _httpHeaders(contentType: 'text/plain', accept: _codec.contentType),
       body: surql,
     );
+    final failures = _importFailures(response.bodyBytes);
+    if (failures != null && failures.isNotEmpty) {
+      throw ImportError(failures);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
-        'Import failed with status ${response.statusCode}',
+        'Import failed with status ${response.statusCode}'
+        '${_problem(response.bodyBytes)}',
         statusCode: response.statusCode,
       );
     }
+    if (failures == null) {
+      throw const ResponseError(
+          'The server did not report how the imported statements went, so '
+          'the import could not be checked');
+    }
   }
 
-  /// Exports the current namespace and database as a SurrealQL document.
-  Future<String> export() async {
-    final response = await _httpClient.get(
-      _httpBase().replace(path: '/export'),
-      headers: _httpHeaders(accept: 'text/plain'),
-    );
+  /// The failed statements in an `/import` response, or null when the body
+  /// is not a list of statement results.
+  List<ServerError>? _importFailures(List<int> body) {
+    if (body.isEmpty) return null;
+    Object? decoded;
+    try {
+      decoded = _codec.decode(body);
+    } catch (_) {
+      // A server may answer in JSON whatever was asked for.
+      try {
+        decoded = jsonDecode(utf8.decode(body));
+      } catch (_) {
+        return null;
+      }
+    }
+    if (decoded is! List) return null;
+    return [
+      for (final (index, statement) in decoded.indexed)
+        if (statement is Map && statement['status'] == 'ERR')
+          ServerError.fromStatement(statement, index: index),
+    ];
+  }
+
+  /// The explanation in an HTTP error body, as `: <text>`, if there is one.
+  String _problem(List<int> body) {
+    try {
+      final decoded = jsonDecode(utf8.decode(body));
+      if (decoded is Map && decoded['information'] is String) {
+        return ': ${decoded['information']}';
+      }
+    } catch (_) {
+      // Not a JSON problem document.
+    }
+    return '';
+  }
+
+  /// Exports the current namespace and database as a SurrealQL document,
+  /// over the server's HTTP `/export` endpoint. Works with either engine.
+  /// [options] choose what to include. Servers before 2.1 cannot take them,
+  /// so they are ignored there and everything is exported.
+  /// [ExportOptions.versions] is sent only to servers before 3.0.
+  Future<String> export({ExportOptions? options}) async {
+    final uri = _httpBase().replace(path: '/export');
+    Future<http.Response> exportAll() =>
+        _http.get(uri, headers: _httpHeaders(accept: 'text/plain'));
+    final version = _parseVersion(_version ?? '');
+    final takesOptions =
+        version == null || _compareVersions(version, const [2, 1, 0]) >= 0;
+    var response = options == null || !takesOptions
+        ? await exportAll()
+        : await _http.post(
+            uri,
+            headers: _httpHeaders(
+                contentType: _codec.contentType, accept: 'text/plain'),
+            body: _codec.encode(options.toJson()
+              // Later servers ignore it or, from 3.3.1, refuse it.
+              ..removeWhere((key, _) =>
+                  key == 'versions' &&
+                  (version == null || version.first >= 3))),
+          );
+    // A server whose version was not checked may still be one that only
+    // exports with GET. From a server known to take options, a 405 is a
+    // failure: exporting everything instead would ignore them.
+    if (response.statusCode == 405 && options != null && version == null) {
+      response = await exportAll();
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpConnectionError(
-        'Export failed with status ${response.statusCode}',
+        'Export failed with status ${response.statusCode}'
+        '${_problem(response.bodyBytes)}',
         statusCode: response.statusCode,
       );
     }
@@ -398,41 +694,28 @@ class Surreal {
   // Internals
   // ---------------------------------------------------------------------------
 
-  Future<Object?> _rpc(String method, [List<Object?> params = const []]) {
+  http.Client get _http {
+    final client = _httpClient;
+    if (client == null) throw const ConnectionUnavailableError();
+    return client;
+  }
+
+  /// Sends an RPC call. A result of NONE, which methods that return nothing
+  /// give, comes back as null, except from `run`, where it is the
+  /// function's own result.
+  Future<Object?> _rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
     final engine = _engine;
     if (engine == null) throw const ConnectionUnavailableError();
-    return engine.rpc(method, params);
+    final result = await engine.rpc(method, params, session: session, txn: txn);
+    return result is SurrealNone && method != 'run' ? null : result;
   }
 
-  SurrealValue _thing(Object resource) {
-    if (resource is SurrealValue) return resource;
-    if (resource is String) {
-      return resource.contains(':')
-          ? StringRecordId(resource)
-          : Table(resource);
-    }
-    throw ArgumentError(
-        'A resource must be a String, Table, RecordId, StringRecordId, or '
-        'RecordIdRange, got ${resource.runtimeType}');
-  }
-
-  /// Coerces a live query id result into a [Uuid]. The CBOR codec returns a
-  /// [Uuid] directly, while the JSON codec returns the canonical string form.
-  Uuid _asUuid(Object? result) {
-    if (result is Uuid) return result;
-    if (result is String) return Uuid(result);
-    throw ResponseError('Expected a live query id, got $result');
-  }
-
-  Tokens _tokensFrom(Object? result) {
-    if (result is String) return Tokens(access: result);
-    if (result is Map) {
-      return Tokens(
-        access: result['token']?.toString() ?? '',
-        refresh: result['refresh']?.toString(),
-      );
-    }
-    return const Tokens(access: '');
+  Stream<Object?> _rpcStream(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) {
+    final engine = _engine;
+    if (engine == null) throw const ConnectionUnavailableError();
+    return engine.rpcStream(method, params, session: session, txn: txn);
   }
 
   Uri _httpBase() {
@@ -450,8 +733,33 @@ class Surreal {
   Map<String, String> _httpHeaders({String? contentType, String? accept}) => {
         if (contentType != null) 'Content-Type': contentType,
         if (accept != null) 'Accept': accept,
-        if (_accessToken != null) 'Authorization': 'Bearer $_accessToken',
-        if (_namespace != null) 'Surreal-NS': _namespace!,
-        if (_database != null) 'Surreal-DB': _database!,
+        if (_session.token != null) 'Authorization': 'Bearer ${_session.token}',
+        if (_session.namespace != null) 'Surreal-NS': _session.namespace!,
+        if (_session.database != null) 'Surreal-DB': _session.database!,
       };
+}
+
+/// Whether [version], as returned by the `version` RPC (for example
+/// `surrealdb-3.3.4` or `3.4.0-nightly+20261014`), is within the range this
+/// client supports.
+bool isSupportedServerVersion(String version) {
+  final parsed = _parseVersion(version);
+  if (parsed == null) return false;
+  return _compareVersions(parsed, _parseVersion(minimumServerVersion)!) >= 0 &&
+      _compareVersions(parsed, _parseVersion(maximumServerVersion)!) < 0;
+}
+
+final RegExp _versionPattern = RegExp(r'(\d+)\.(\d+)\.(\d+)');
+
+List<int>? _parseVersion(String version) {
+  final match = _versionPattern.firstMatch(version);
+  if (match == null) return null;
+  return [for (var i = 1; i <= 3; i++) int.parse(match.group(i)!)];
+}
+
+int _compareVersions(List<int> a, List<int> b) {
+  for (var i = 0; i < 3; i++) {
+    if (a[i] != b[i]) return a[i].compareTo(b[i]);
+  }
+  return 0;
 }

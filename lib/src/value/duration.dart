@@ -8,6 +8,9 @@ const int _secondsPerHour = 3600;
 const int _secondsPerDay = 86400;
 const int _secondsPerWeek = 604800;
 
+/// A year, as SurrealDB counts it: 365 days.
+const int _secondsPerYear = 31536000;
+
 /// A length of time, held as whole seconds plus a nanosecond remainder. This
 /// matches the precision SurrealDB uses and avoids the microsecond limit of
 /// the Dart [Duration] type.
@@ -18,18 +21,27 @@ final class SurrealDuration extends SurrealValue {
 
   /// Builds a duration from a Dart [Duration]. Dart durations have microsecond
   /// precision, so the nanosecond remainder is always a multiple of 1000.
+  ///
+  /// A negative duration has negative [seconds] and a [nanoseconds] remainder
+  /// that counts forwards from them, so -1 microsecond is `-1` seconds plus
+  /// 999999000 nanoseconds. SurrealDB itself only stores durations of zero or
+  /// more.
   factory SurrealDuration.fromDart(Duration duration) {
     final micros = duration.inMicroseconds;
+    final remainder = micros % 1000000;
     return SurrealDuration(
-      seconds: micros ~/ 1000000,
-      nanoseconds: (micros % 1000000) * _nanosPerMicro,
+      seconds: (micros - remainder) ~/ 1000000,
+      nanoseconds: remainder * _nanosPerMicro,
     );
   }
 
-  factory SurrealDuration.nanoseconds(int value) => SurrealDuration(
-        seconds: value ~/ _nanosPerSecond,
-        nanoseconds: value % _nanosPerSecond,
-      );
+  factory SurrealDuration.nanoseconds(int value) {
+    final remainder = value % _nanosPerSecond;
+    return SurrealDuration(
+      seconds: (value - remainder) ~/ _nanosPerSecond,
+      nanoseconds: remainder,
+    );
+  }
 
   factory SurrealDuration.microseconds(int value) =>
       SurrealDuration.nanoseconds(value * _nanosPerMicro);
@@ -52,8 +64,21 @@ final class SurrealDuration extends SurrealValue {
   factory SurrealDuration.weeks(int value) =>
       SurrealDuration(seconds: value * _secondsPerWeek);
 
-  /// Parses a SurrealDB duration string such as `1w2d3h`, `500ms` or `90s`.
+  /// [value] years of 365 days, as SurrealDB counts them.
+  factory SurrealDuration.years(int value) =>
+      SurrealDuration(seconds: value * _secondsPerYear);
+
+  /// Parses a SurrealDB duration string such as `1y2w`, `1w2d3h`, `500ms` or
+  /// `90s`.
+  /// A leading `-` gives a negative duration, as [toString] writes one.
   factory SurrealDuration.parse(String input) {
+    if (input.startsWith('-')) {
+      final magnitude = input.substring(1);
+      if (magnitude.isEmpty || magnitude.startsWith('-')) {
+        throw FormatException('Invalid duration', input);
+      }
+      return SurrealDuration.parse(magnitude)._negated();
+    }
     if (input.isEmpty || input == '0' || input == '0ns') {
       return const SurrealDuration();
     }
@@ -85,6 +110,8 @@ final class SurrealDuration extends SurrealValue {
           seconds += amount * _secondsPerDay;
         case 'w':
           seconds += amount * _secondsPerWeek;
+        case 'y':
+          seconds += amount * _secondsPerYear;
       }
     }
     if (consumed != input.length) {
@@ -110,7 +137,18 @@ final class SurrealDuration extends SurrealValue {
   /// The compact tuple form used by the CBOR codec: an empty list for a zero
   /// duration, `[seconds]` when there is no nanosecond remainder, otherwise
   /// `[seconds, nanoseconds]`.
+  ///
+  /// SurrealDB durations are unsigned - the server reads tag 14 as
+  /// `[u64, u32]` - so a negative duration has no wire form and throws here
+  /// rather than being sent as a negative integer the server would refuse.
   List<int> toCompact() {
+    if (isNegative) {
+      throw ArgumentError.value(
+        toString(),
+        'duration',
+        'SurrealDB durations cannot be negative',
+      );
+    }
     if (seconds == 0 && nanoseconds == 0) return const [];
     if (nanoseconds == 0) return [seconds];
     return [seconds, nanoseconds];
@@ -119,9 +157,22 @@ final class SurrealDuration extends SurrealValue {
   @override
   String toJson() => toString();
 
+  /// Whether this duration is less than zero.
+  bool get isNegative => seconds < 0;
+
+  /// The duration with the opposite sign, negated as (seconds, nanoseconds)
+  /// to stay exact for large values.
+  SurrealDuration _negated() => nanoseconds == 0
+      ? SurrealDuration(seconds: -seconds)
+      : SurrealDuration(
+          seconds: -seconds - 1,
+          nanoseconds: _nanosPerSecond - nanoseconds,
+        );
+
   @override
   String toString() {
     if (seconds == 0 && nanoseconds == 0) return '0ns';
+    if (isNegative) return '-${_negated()}';
     final buffer = StringBuffer();
     var remaining = seconds;
     void unit(int size, String suffix) {
@@ -131,6 +182,7 @@ final class SurrealDuration extends SurrealValue {
       }
     }
 
+    unit(_secondsPerYear, 'y');
     unit(_secondsPerWeek, 'w');
     unit(_secondsPerDay, 'd');
     unit(_secondsPerHour, 'h');
@@ -160,4 +212,4 @@ final class SurrealDuration extends SurrealValue {
   int get hashCode => Object.hash(seconds, nanoseconds);
 }
 
-final RegExp _durationPattern = RegExp(r'(\d+)(ns|µs|us|ms|s|m|h|d|w)');
+final RegExp _durationPattern = RegExp(r'(\d+)(ns|µs|us|ms|s|m|h|d|w|y)');

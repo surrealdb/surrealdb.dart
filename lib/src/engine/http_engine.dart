@@ -2,12 +2,15 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
+import '../cbor/codec.dart';
 import '../errors.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
+import 'session_state.dart';
 
 /// Carries RPC over HTTP by posting encoded messages to `/rpc`. The
 /// serialization is set by the [SurrealCodec] it is given.
@@ -16,32 +19,45 @@ import 'rpc.dart';
 /// header state rather than making a round trip, and live queries are not
 /// supported.
 class HttpEngine implements Engine {
-  HttpEngine(SurrealCodec codec, {http.Client? client})
-      : _codec = codec,
+  HttpEngine(
+    SurrealCodec codec, {
+    http.Client? client,
+    Duration? requestTimeout,
+    SessionState? session,
+  })  : _session = session ?? SessionState(),
         _protocol = RpcProtocol(codec),
-        _client = client ?? http.Client();
+        _client = client ?? http.Client(),
+        _requestTimeout = requestTimeout;
 
-  final SurrealCodec _codec;
+  SurrealCodec get _codec => _protocol.codec;
+
+  @override
+  SurrealCodec get codec => _protocol.codec;
+
+  @override
+  set codec(SurrealCodec value) => _protocol.codec = value;
   final RpcProtocol _protocol;
 
   final http.Client _client;
+  final Duration? _requestTimeout;
   final _statusController = StreamController<ConnectionStatus>.broadcast();
 
   Uri? _url;
   ConnectionStatus _status = ConnectionStatus.disconnected;
 
-  String? _namespace;
-  String? _database;
-  String? _token;
+  /// The session state sent with every request: the namespace and database
+  /// as headers, the token as a bearer token and the variables merged into
+  /// each query.
+  final SessionState _session;
 
   /// The namespace currently selected for outgoing requests.
-  String? get namespace => _namespace;
+  String? get namespace => _session.namespace;
 
   /// The database currently selected for outgoing requests.
-  String? get database => _database;
+  String? get database => _session.database;
 
   /// The bearer token sent with outgoing requests.
-  String? get token => _token;
+  String? get token => _session.token;
 
   @override
   ConnectionStatus get status => _status;
@@ -50,10 +66,32 @@ class HttpEngine implements Engine {
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
 
   @override
+  bool get supportsStreaming => false;
+
+  @override
+  bool get supportsLiveQueries => false;
+
+  @override
   Stream<LiveMessage> get liveNotifications => const Stream.empty();
 
   @override
+  set onVerify(
+      Future<void> Function(
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
+
+  @override
   set onReconnect(Future<void> Function()? handler) {}
+
+  @override
+  set onAuthenticationLost(
+      Future<bool> Function(
+              Uuid? session,
+              Object error,
+              Future<Object?> Function(String method, List<Object?> params)
+                  call)?
+          handler) {}
 
   @override
   Future<void> open(Uri url,
@@ -73,32 +111,82 @@ class HttpEngine implements Engine {
   }
 
   @override
-  Future<Object?> rpc(String method, List<Object?> params) async {
+  Stream<Object?> rpcStream(String method, List<Object?> params,
+          {Uuid? session, Uuid? txn}) =>
+      throw const UnsupportedFeatureError('streaming');
+
+  @override
+  bool get supportsSessions => false;
+
+  @override
+  void trackSession(Uuid id, SessionState state) =>
+      throw const UnsupportedFeatureError('sessions');
+
+  @override
+  void untrackSession(Uuid id) {}
+
+  @override
+  Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
+    if (session != null) throw const UnsupportedFeatureError('sessions');
+    if (txn != null) throw const UnsupportedFeatureError('transactions');
     switch (method) {
-      case 'use':
-        if (params.isNotEmpty && params[0] != null) {
-          _namespace = params[0] as String;
-        }
-        if (params.length > 1 && params[1] != null) {
-          _database = params[1] as String;
-        }
-        return null;
+      case 'attach':
+      case 'detach':
+      case 'sessions':
+        throw const UnsupportedFeatureError('sessions');
+      case 'begin':
+      case 'commit':
+      case 'cancel':
+        throw const UnsupportedFeatureError('transactions');
+      // Each HTTP request is its own server-side session, so session state is
+      // kept here and sent with every request instead.
       case 'authenticate':
-        _token = params.isNotEmpty ? params[0] as String? : null;
+        // Checked with the server, as over WebSocket, so that a token it
+        // rejects fails here rather than every call after.
+        if (params.isNotEmpty && params[0] != null) {
+          await _send(method, params);
+        }
+        _session.apply(method, params, null);
         return null;
+      case 'use':
       case 'invalidate':
-        _token = null;
-        return null;
       case 'let':
+        // Kept as it encodes now, so later changes to the caller's objects
+        // do not reach the value sent with each query. NONE removes the
+        // variable, so it is passed on as it is.
+        final keep = params.length > 1 && params[1] is! SurrealNone
+            ? (_codec.decode(_codec.encode(params)) as List).cast<Object?>()
+            : params;
+        _session.apply(method, keep, null);
+        return null;
       case 'unset':
+      case 'reset':
+        _session.apply(method, params, null);
+        return null;
       case 'live':
       case 'kill':
         throw UnsupportedFeatureError(method);
+      case 'query':
+      case 'gql':
+        // Variables set with `let` apply to every query, under any bound in
+        // the call itself.
+        if (_session.variables.isNotEmpty) {
+          final bindings = params.length > 1 ? params[1] : null;
+          params = [
+            params[0],
+            {
+              ..._session.variables,
+              if (bindings is Map) ...bindings,
+            },
+            ...params.skip(2),
+          ];
+        }
     }
 
     final result = await _send(method, params);
-    if (method == 'signin' || method == 'signup') {
-      _token = _extractToken(result);
+    if (method == 'signin' || method == 'signup' || method == 'refresh') {
+      _session.apply(method, params, result);
     }
     return result;
   }
@@ -106,16 +194,48 @@ class HttpEngine implements Engine {
   Future<Object?> _send(String method, List<Object?> params) async {
     if (_url == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
+    final codec = _codec;
     final body = _protocol.encodeRequest(id, method, params);
     final headers = <String, String>{
-      'Content-Type': _codec.contentType,
-      'Accept': _codec.contentType,
-      if (_token != null) 'Authorization': 'Bearer $_token',
-      if (_namespace != null) 'Surreal-NS': _namespace!,
-      if (_database != null) 'Surreal-DB': _database!,
+      'Content-Type': codec.contentType,
+      // The built-in CBOR codec asks for cbor.2. A 4.0 server answers in it,
+      // and the requests after that are sent in it too; one before 4.0
+      // answers in cbor. A subclass is the caller's own, and is used as is.
+      'Accept': _negotiates(codec) ? _cbor2 : codec.contentType,
+      if (_session.token != null) 'Authorization': 'Bearer ${_session.token}',
+      if (_session.namespace != null) 'Surreal-NS': _session.namespace!,
+      if (_session.database != null) 'Surreal-DB': _session.database!,
     };
-    final response = await _client.post(_url!, headers: headers, body: body);
+    // Completing this aborts the request, so a timed out request does not
+    // keep its connection open.
+    final abort = Completer<void>();
+    final request =
+        http.AbortableRequest('POST', _url!, abortTrigger: abort.future)
+          ..headers.addAll(headers)
+          ..bodyBytes = body;
+    final sending = _client.send(request).then(http.Response.fromStream);
+    final timeout = _requestTimeout;
+    final response = timeout == null
+        ? await sending
+        : await sending.timeout(timeout, onTimeout: () {
+            abort.complete();
+            throw RequestTimeoutError(method, timeout);
+          });
+    // The reply is decoded in the dialect it came in, which the requests
+    // after it then use.
+    final current = _codec;
+    final type = response.headers['content-type'];
+    if (current is CborCodec &&
+        _negotiates(current) &&
+        type != null &&
+        type.startsWith('application/cbor') &&
+        current.sizedNumbers != _isCbor2(type)) {
+      this.codec = current.copyWith(sizedNumbers: _isCbor2(type));
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      // Prefer the server's own error, when the body carries one.
+      final error = _tryDecodeError(response.bodyBytes, id);
+      if (error != null) throw error;
       throw HttpConnectionError(
         'Request failed with status ${response.statusCode}',
         statusCode: response.statusCode,
@@ -126,11 +246,25 @@ class HttpEngine implements Engine {
     return decoded.result;
   }
 
-  String? _extractToken(Object? result) {
-    if (result is String) return result;
-    if (result is Map && result['token'] is String) {
-      return result['token'] as String;
+  static const _cbor2 = 'application/cbor; v=2';
+
+  static bool _negotiates(SurrealCodec codec) => codec.runtimeType == CborCodec;
+
+  /// Whether the media [type] is `application/cbor` with `v=2`.
+  static bool _isCbor2(String type) => type
+      .split(';')
+      .skip(1)
+      .any((parameter) => parameter.replaceAll(' ', '') == 'v=2');
+
+  /// The error in [body] when it is SurrealDB's reply to request [id]. A
+  /// body from anything else, such as a proxy in front of the server, is
+  /// left to the HTTP status.
+  ResponseError? _tryDecodeError(List<int> body, String id) {
+    try {
+      final response = _protocol.decodeResponse(body);
+      return response.id == id ? response.error : null;
+    } catch (_) {
+      return null;
     }
-    return null;
   }
 }

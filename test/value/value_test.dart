@@ -31,6 +31,14 @@ void main() {
       );
     });
 
+    test('reads and writes years of 365 days, as the server does', () {
+      final duration = SurrealDuration.parse('1y2w');
+      expect(duration.seconds, 365 * 86400 + 14 * 86400);
+      expect(SurrealDuration.years(1).seconds, 365 * 86400);
+      expect(duration.toString(), '1y2w');
+      expect(SurrealDuration.weeks(53).toString(), '1y6d');
+    });
+
     test('parses sub second units', () {
       final duration = SurrealDuration.parse('500ms');
       expect(duration.seconds, 0);
@@ -65,6 +73,15 @@ void main() {
       final dt = SurrealDateTime.parse('2026-06-16T10:00:00Z');
       expect(dt.toDateTime(), DateTime.utc(2026, 6, 16, 10));
     });
+
+    test('parses RFC 3339 with nanoseconds', () {
+      expect(SurrealDateTime.parse('2026-01-01T00:00:00.123456789Z'),
+          const SurrealDateTime(1767225600, 123456789));
+      expect(SurrealDateTime.parse('2026-01-01T02:00:00.5+02:00'),
+          const SurrealDateTime(1767225600, 500000000));
+      expect(SurrealDateTime.parse('1969-12-31T23:59:59.999999999Z'),
+          const SurrealDateTime(-1, 999999999));
+    });
   });
 
   group('Uuid', () {
@@ -84,6 +101,77 @@ void main() {
         'type': 'Point',
         'coordinates': [1.0, 2.0],
       });
+    });
+  });
+
+  group('times before the epoch', () {
+    test('a datetime before 1970 keeps its seconds', () {
+      final value = SurrealDateTime.fromDateTime(
+          DateTime.utc(1969, 12, 31, 23, 59, 59, 500));
+      expect(value.seconds, -1);
+      expect(value.nanoseconds, 500000000);
+      expect(value.toDateTime(), DateTime.utc(1969, 12, 31, 23, 59, 59, 500));
+    });
+
+    test('a datetime one microsecond before the epoch', () {
+      final value = SurrealDateTime.fromDateTime(
+          DateTime.fromMicrosecondsSinceEpoch(-1, isUtc: true));
+      expect(value.seconds, -1);
+      expect(value.nanoseconds, 999999000);
+    });
+
+    test('a whole-second datetime before 1970', () {
+      final value = SurrealDateTime.fromDateTime(DateTime.utc(1900));
+      expect(value.seconds, -2208988800);
+      expect(value.nanoseconds, 0);
+      expect(value.toString(), '1900-01-01T00:00:00.000Z');
+    });
+
+    test('a negative duration keeps its seconds', () {
+      final value =
+          SurrealDuration.fromDart(const Duration(milliseconds: -1500));
+      expect(value.seconds, -2);
+      expect(value.nanoseconds, 500000000);
+      expect(value.toDart(), const Duration(milliseconds: -1500));
+      expect(value.toString(), '-1s500ms');
+      expect(value.isNegative, isTrue);
+    });
+
+    test('negative nanoseconds', () {
+      final value = SurrealDuration.nanoseconds(-1);
+      expect(value.seconds, -1);
+      expect(value.nanoseconds, 999999999);
+      expect(value.inNanoseconds, -1);
+      expect(value.toString(), '-1ns');
+    });
+
+    test('a negative duration has no wire form', () {
+      // The server reads tag 14 as [u64, u32], so a negative duration cannot
+      // be sent; it is refused here rather than on the server.
+      for (final value in [
+        SurrealDuration.fromDart(const Duration(milliseconds: -1500)),
+        SurrealDuration.nanoseconds(-1),
+        SurrealDuration.weeks(-3),
+      ]) {
+        expect(value.toCompact, throwsArgumentError);
+      }
+
+      expect(const SurrealDuration().toCompact(), isEmpty);
+      expect(SurrealDuration.fromSeconds(90).toCompact(), [90]);
+      expect(
+          SurrealDuration.nanoseconds(1500000000).toCompact(), [1, 500000000]);
+    });
+
+    test('a negative duration parses back from its string', () {
+      for (final value in [
+        SurrealDuration.fromDart(const Duration(milliseconds: -1500)),
+        SurrealDuration.nanoseconds(-1),
+        SurrealDuration.weeks(-3),
+      ]) {
+        expect(SurrealDuration.parse(value.toString()), value);
+      }
+      expect(() => SurrealDuration.parse('-'), throwsFormatException);
+      expect(() => SurrealDuration.parse('--1s'), throwsFormatException);
     });
   });
 }

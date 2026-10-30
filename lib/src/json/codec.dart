@@ -40,6 +40,7 @@ class JsonCodec implements SurrealCodec {
     }
     if (value is Duration) return SurrealDuration.fromDart(value).toString();
     if (value is BigInt) return value.toString();
+    if (value is Set) return value.toList();
     throw ArgumentError('Cannot encode value of type ${value.runtimeType}');
   }
 }

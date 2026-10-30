@@ -11,13 +11,21 @@ web, and desktop), since it depends only on portable packages.
 - WebSocket and HTTP engines, selected automatically by the connection URL.
 - Live queries delivered as a Dart `Stream`, with automatic reconnect and
   restart on the WebSocket engine.
+- Sessions as objects (`newSession`, `forkSession`, `sessions`) and
+  interactive transactions (`beginTransaction`, `commit`, `cancel`) over
+  WebSocket.
 - The full RPC surface: `use`, `signin`, `signup`, `authenticate`, `invalidate`,
-  `info`, `set`, `unset`, `query`, `select`, `create`, `insert`,
+  `reset`, `info`, `set`, `unset`, `query`, `select`, `create`, `insert`,
   `insertRelation`, `update`, `upsert`, `merge`, `patch`, `delete`, `relate`,
-  `run`, `live`, `kill`, `import`, `export`, `version`, and `health`.
+  `run`, `live`, `liveOf`, `kill`, `gql`, `graphql`, `api`, `queryStream`,
+  `import`, `export`, `version`, and `health`.
+- Session state (namespace, database, variables and authentication) that is
+  replayed after a WebSocket reconnect, and kept by the client over HTTP.
 - Native data types: `RecordId`, `StringRecordId`, `Table`, `Range`, `Uuid`,
   `Decimal`, `SurrealDuration`, `SurrealDateTime`, `SurrealFuture`, `FileRef`,
-  and the geometry types, all carried losslessly through the CBOR codec.
+  the geometry types, Dart `Set`s, `none` for NONE (distinct from `null`,
+  which is NULL), and SurrealDB 4.0's sized numbers (`SizedInt` and
+  `SizedFloat`), all carried losslessly through the CBOR codec.
 - Record access, system user, and bearer authentication.
 - A standalone client for the Agent Memory API.
 
@@ -105,8 +113,133 @@ await subscription.cancel();
 await live.kill();
 ```
 
+To follow a live query started some other way, for example with a
+`LIVE SELECT` statement in `query`, attach to it by id with `liveOf`. Such a
+query cannot be restarted after a reconnect, so its stream then reports a
+`LiveQueryLostError` and closes.
+
 Live queries require the WebSocket engine. Calling `live` over the HTTP engine
 throws an `UnsupportedFeatureError`.
+
+### Streaming results
+
+`queryStream` gives a query's results as they are produced instead of all at
+once. Each statement's rows arrive in `QueryRows` batches (or a single
+`QueryValue`), followed by a `QueryStatementDone` that carries the statement's
+error if it failed. Cancelling the subscription cancels the query on the
+server.
+
+```dart
+await for (final frame in db.queryStream('SELECT * FROM event')) {
+  switch (frame) {
+    case QueryRows(:final values):
+      values.forEach(process);
+    case QueryStatementDone(:final error?):
+      print('Statement ${frame.statement} failed: $error');
+    default:
+  }
+}
+```
+
+Results are streamed over WebSocket from SurrealDB 3.3. Over HTTP, or against
+an older server, the query runs as with `query` and the same frames are given
+when it completes. `query` itself never streams, so inside a transaction a
+query only streams when you ask for it with `queryStream`.
+
+### Graph queries, GraphQL and custom APIs
+
+```dart
+// ISO GQL graph queries (SurrealDB 3.2+).
+final [friends] = await db.gql(
+  r'MATCH (p:person)-[:knows]->(f:person) WHERE p.name = $name RETURN f.name',
+  bindings: {'name': 'Ann'},
+);
+
+// GraphQL, once enabled with DEFINE CONFIG GRAPHQL (SurrealDB 3.2+).
+final response = await db.graphql(r'query Q($id: ID!) { person(id: $id) { name } }',
+    variables: {'id': 'tobie'});
+
+// APIs defined with DEFINE API.
+final result = await db.api.header('x-tenant', 'acme').get('/users/tobie');
+print(result.value()); // the body, or an UnsuccessfulApiError
+```
+
+### Sessions and transactions
+
+Over WebSocket, one connection can carry several sessions, each with its own
+namespace, database, variables, authentication and live queries. The client
+itself is the default session; `newSession` attaches an empty one and
+`forkSession` one that starts as a copy. Sessions are attached again and
+replayed after a reconnect.
+
+```dart
+final tenant = await db.newSession();
+await tenant.signin(tenantCredentials);
+await tenant.use(namespace: 'acme', database: 'app');
+final rows = await tenant.query('SELECT * FROM invoice');
+
+print(await db.sessions()); // ids of the attached sessions
+await tenant.close();
+```
+
+Interactive transactions run on the client or on any session:
+
+```dart
+final txn = await db.beginTransaction();
+try {
+  await txn.merge(const RecordId('account', 'a'), {'balance': 90});
+  await txn.merge(const RecordId('account', 'b'), {'balance': 110});
+} catch (_) {
+  await txn.cancel();
+  rethrow;
+}
+// Outside the try: a commit that fails has already ended the transaction.
+await txn.commit();
+```
+
+Both need SurrealDB 3.0 or later. They are not available over HTTP, where
+every request is its own session.
+
+### Errors
+
+Errors the server reports are thrown as a `ServerError`, with the server's
+`kind`, JSON-RPC `code` and structured `details`. Each kind has its own
+subclass: `ValidationError`, `ConfigurationError`, `QueryError`,
+`SerializationError`, `NotAllowedError`, `NotFoundError`, `AlreadyExistsError`,
+`ServerConnectionError`, `ThrownError`, `InternalError` and `ContextError`.
+
+```dart
+try {
+  await db.query('SELECT * FROM person');
+} on NotFoundError catch (error) {
+  print('No such table: ${error.tableName}');
+} on NotAllowedError catch (error) {
+  if (error.isTokenExpired) await db.signin(credentials);
+}
+```
+
+A failed statement in a `query` batch is thrown the same way, with
+`statementIndex` set to its position. Use `queryRaw` to get every statement's
+status without throwing.
+
+### Import and export
+
+`export` returns the database as SurrealQL. Pass `ExportOptions` to choose
+what it includes, and `import` loads such a document back. A document must
+start with `OPTION IMPORT;`, as an export does. If any statement fails,
+`import` throws an `ImportError` with the error of each failed statement.
+
+```dart
+final dump = await db.export(
+  options: ExportOptions(tables: ExportTables.only(['person']), users: false),
+);
+
+try {
+  await db.import(dump);
+} on ImportError catch (error) {
+  for (final failure in error.failures) print(failure.message);
+}
+```
 
 ### Serialization format
 
@@ -125,6 +258,12 @@ The format sets the WebSocket subprotocol and the HTTP content type. To plug in
 your own serialization, implement `SurrealCodec` and pass it as
 `ConnectOptions(codec: ...)`.
 
+With CBOR the driver asks for `cbor.2`, which a SurrealDB 4.0 server speaks and
+which adds the sized numbers. Over WebSocket it offers `cbor.2` before `cbor`;
+over HTTP it asks for `application/cbor; v=2` and sends it once the server has
+answered in it. A server before 4.0 answers in plain `cbor`, so the same client
+talks to both. `db.codec` says which one the connection speaks.
+
 ### Authentication
 
 ```dart
@@ -140,6 +279,24 @@ await db.signin(const AccessRecordAuth(
 ));
 ```
 
+When the access method is defined `WITH REFRESH`, `signin` and `signup` also
+return a refresh token. The client keeps both, renews the access token
+shortly before it expires (`ConnectOptions.renewTokens` and
+`tokenExpiryMargin`), and uses the refresh token when a reconnect finds the
+access token expired. Without a refresh token, the client renews by signing in
+again with `ConnectOptions.authentication`, when that was given.
+
+```dart
+final tokens = await db.signin(credentials);
+db.authChanges.listen((tokens) => saveTokens(tokens));
+
+// Later, or in a new process:
+await db.authenticate(tokens.access, refreshToken: tokens.refresh);
+
+final renewed = await db.refresh(); // new access and refresh tokens
+await db.revoke();                  // the refresh token can no longer be used
+```
+
 ### Data types
 
 ```dart
@@ -150,6 +307,19 @@ await db.create(const RecordId('event', 'launch'), {
   'where': const GeometryPoint(-0.118092, 51.509865),
 });
 ```
+
+SurrealDB 4.0 adds fixed-width numbers, `i8` to `u64`, `f16` and `f32`. Over
+`cbor.2` they keep their kind both ways, as `SizedInt` and `SizedFloat`:
+
+```dart
+await db.query(r'CREATE pixel SET r = $r', bindings: {'r': SizedInt.u8(255)});
+final [half] = await db.query('RETURN 1.5f16'); // SizedFloat.f16(1.5)
+```
+
+Over plain `cbor`, with a server before 4.0, they are sent as plain integers
+and floats (a `u64` beyond the 64-bit signed range as a `Decimal`), as the
+server widens them too. A `BigInt` beyond 64 bits is always sent as a
+`Decimal`, since SurrealDB integers are 64-bit.
 
 ## Flutter
 
@@ -192,18 +362,36 @@ Future<void> main() async {
 
 ## Testing
 
-Run the unit tests, which need no server:
+Run the unit tests, which need no server, on the VM and in Chrome:
 
 ```sh
-dart test test/cbor test/value test/memory
+dart test test/cbor test/conformance test/engine test/json test/memory test/value
+dart test --platform chrome test/cbor test/engine test/json test/memory test/value
+```
+
+`test/conformance` runs the shared CBOR test vectors from [surrealdb-protocol](https://github.com/surrealdb/surrealdb-protocol) at the release named in `test/conformance/VERSION`. The vectors are not committed here: fetch them with `tool/fetch_conformance_vectors.sh` before running the tests, or the vector tests are skipped. The script checks them against `test/conformance/vectors.sha256`; given a new tag, it pins that release instead.
+
+`tool/conformance_driver.dart` runs the shared conformance scenarios from the
+same repository through the SDK. CI runs them against each supported server.
+To run them yourself, compile the driver and start the runner from a checkout
+of surrealdb-protocol (it needs [Bun](https://bun.sh) and a `surreal` binary):
+
+```sh
+dart compile exe tool/conformance_driver.dart -o build/conformance_driver
+cd ../surrealdb-protocol && bun install
+bun conformance/runner/cli.ts --driver "$OLDPWD/build/conformance_driver"
 ```
 
 Run the integration tests against a local server:
 
 ```sh
 surreal start --user root --pass root memory
-SURREAL_INTEGRATION=1 dart test test/integration
+SURREAL_INTEGRATION=1 dart test --concurrency=1 test/integration
 ```
+
+Point them at another server with `SURREAL_WS_URL` and `SURREAL_HTTP_URL`.
+CI runs the integration tests against the latest 3.x release and the nightly
+build.
 
 ## License
 

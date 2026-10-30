@@ -3,12 +3,16 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../cbor/codec.dart';
 import '../errors.dart';
+import '../internal/jwt.dart';
 import '../protocol/codec.dart';
 import '../types/connection.dart';
 import '../types/live.dart';
+import '../value/value.dart';
 import 'engine.dart';
 import 'rpc.dart';
+import 'session_state.dart';
 
 /// Carries RPC over a WebSocket. Supports live queries and automatic
 /// reconnection. The serialization is set by the [SurrealCodec] it is given,
@@ -17,14 +21,31 @@ class WebSocketEngine implements Engine {
   WebSocketEngine(
     SurrealCodec codec, {
     ReconnectOptions reconnect = const ReconnectOptions(),
-  })  : _codec = codec,
+    Duration? requestTimeout,
+    SessionState? session,
+  })  : _session = session ?? SessionState(),
         _protocol = RpcProtocol(codec),
-        _reconnect = reconnect;
+        _reconnect = reconnect,
+        _requestTimeout = requestTimeout;
 
-  final SurrealCodec _codec;
+  SurrealCodec get _codec => _protocol.codec;
+
+  @override
+  SurrealCodec get codec => _protocol.codec;
+
+  @override
+  set codec(SurrealCodec value) => _protocol.codec = value;
   final RpcProtocol _protocol;
   final ReconnectOptions _reconnect;
+  final Duration? _requestTimeout;
   final _pending = <String, Completer<Object?>>{};
+  final _streams = <String, StreamController<Object?>>{};
+
+  /// Streams cancelled on the server and not yet ended there, by request id.
+  final _cancelling = <String, Completer<void>>{};
+
+  /// Timers for streams still waiting for their first reply, by request id.
+  final _firstFrame = <String, Timer>{};
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _liveController = StreamController<LiveMessage>.broadcast();
 
@@ -33,14 +54,33 @@ class WebSocketEngine implements Engine {
   Uri? _url;
   Duration _timeout = const Duration(seconds: 30);
   var _intentionalClose = false;
+  var _reconnecting = false;
 
-  // Session state, replayed after a reconnect.
-  String? _namespace;
-  String? _database;
-  String? _token;
+  /// The state of the connection's default session, replayed after a
+  /// reconnect.
+  final SessionState _session;
+
+  /// The state of each attached session, by id, attached again and replayed
+  /// after a reconnect.
+  final Map<Uuid, SessionState> _attached = {};
+
+  @override
+  bool get supportsSessions => true;
+
+  @override
+  void trackSession(Uuid id, SessionState state) => _attached[id] = state;
+
+  @override
+  void untrackSession(Uuid id) => _attached.remove(id);
 
   ConnectionStatus _status = ConnectionStatus.disconnected;
   Future<void> Function()? _onReconnect;
+  Future<void> Function(
+          Future<Object?> Function(String method, List<Object?> params) call)?
+      _onVerify;
+  Future<bool> Function(Uuid? session, Object error,
+          Future<Object?> Function(String method, List<Object?> params) call)?
+      _onAuthenticationLost;
 
   @override
   ConnectionStatus get status => _status;
@@ -49,10 +89,34 @@ class WebSocketEngine implements Engine {
   Stream<ConnectionStatus> get statusChanges => _statusController.stream;
 
   @override
+  bool get supportsStreaming => true;
+
+  @override
+  bool get supportsLiveQueries => true;
+
+  @override
   Stream<LiveMessage> get liveNotifications => _liveController.stream;
 
   @override
+  set onVerify(
+          Future<void> Function(
+                  Future<Object?> Function(String method, List<Object?> params)
+                      call)?
+              handler) =>
+      _onVerify = handler;
+
+  @override
   set onReconnect(Future<void> Function()? handler) => _onReconnect = handler;
+
+  @override
+  set onAuthenticationLost(
+          Future<bool> Function(
+                  Uuid? session,
+                  Object error,
+                  Future<Object?> Function(String method, List<Object?> params)
+                      call)?
+              handler) =>
+      _onAuthenticationLost = handler;
 
   void _setStatus(ConnectionStatus value) {
     if (_status == value) return;
@@ -66,81 +130,251 @@ class WebSocketEngine implements Engine {
     _url = url;
     _timeout = timeout;
     _intentionalClose = false;
-    await _connect();
+    _setStatus(ConnectionStatus.connecting);
+    try {
+      await _connect();
+    } catch (_) {
+      _setStatus(ConnectionStatus.disconnected);
+      rethrow;
+    }
+    _setStatus(ConnectionStatus.connected);
   }
 
+  /// Opens a socket and makes it the current channel. On failure the socket
+  /// is closed, so a failed attempt never leaves a connection behind.
   Future<void> _connect() async {
-    _setStatus(_status == ConnectionStatus.disconnected
-        ? ConnectionStatus.connecting
-        : ConnectionStatus.reconnecting);
-    final channel = WebSocketChannel.connect(_url!, protocols: [_codec.name]);
+    final codec = _codec;
+    // The built-in CBOR codec offers cbor.2 first: a 4.0 server picks it, and
+    // one before 4.0, which only knows cbor, picks that. A subclass is the
+    // caller's own, and is used as it is.
+    final negotiate = codec is CborCodec && codec.runtimeType == CborCodec;
+    final protocols = negotiate ? const [_cbor2, _cbor] : [codec.name];
+    final channel = WebSocketChannel.connect(_url!, protocols: protocols);
     try {
       await channel.ready.timeout(_timeout);
-    } on TimeoutException {
-      throw const SurrealError('Timed out while connecting to the server');
     } catch (error) {
+      unawaited(_closeChannel(channel));
+      if (error is TimeoutException) {
+        throw const SurrealError('Timed out while connecting to the server');
+      }
       throw SurrealError('Failed to connect to the server', cause: error);
+    }
+    if (negotiate) {
+      this.codec = codec.copyWith(sizedNumbers: channel.protocol == _cbor2);
     }
     _channel = channel;
     _subscription = channel.stream.listen(
       _onMessage,
-      onError: (Object error) => _onDisconnected(error),
-      onDone: () => _onDisconnected(null),
+      // Events from a socket that has since been replaced are ignored.
+      onError: (Object error) {
+        if (identical(_channel, channel)) _onDisconnected(error);
+      },
+      onDone: () {
+        if (identical(_channel, channel)) _onDisconnected(null);
+      },
     );
-    _setStatus(ConnectionStatus.connected);
+  }
+
+  static const _cbor = 'cbor';
+  static const _cbor2 = 'cbor.2';
+
+  Future<void> _closeChannel(WebSocketChannel channel) async {
+    try {
+      await channel.sink.close().timeout(_timeout);
+    } catch (_) {
+      // The socket is already gone.
+    }
+  }
+
+  /// Closes the current socket, if any, without triggering a reconnect.
+  Future<void> _dropChannel() async {
+    final channel = _channel;
+    final subscription = _subscription;
+    _channel = null;
+    _subscription = null;
+    await subscription?.cancel();
+    if (channel != null) await _closeChannel(channel);
   }
 
   @override
   Future<void> close() async {
     _intentionalClose = true;
-    await _subscription?.cancel();
-    await _channel?.sink.close();
-    _channel = null;
+    await _dropChannel();
     _failPending(const ConnectionUnavailableError());
     _setStatus(ConnectionStatus.disconnected);
   }
 
   @override
-  Future<Object?> rpc(String method, List<Object?> params) async {
-    final channel = _channel;
-    if (channel == null || _status != ConnectionStatus.connected) {
+  Future<Object?> rpc(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
+    if (_status != ConnectionStatus.connected) {
       throw const ConnectionUnavailableError();
     }
+    return _call(method, params, session: session, txn: txn);
+  }
+
+  @override
+  Stream<Object?> rpcStream(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) {
+    String? id;
+    late final StreamController<Object?> controller;
+    controller = StreamController<Object?>(
+      onListen: () {
+        final channel = _channel;
+        if (channel == null || _status != ConnectionStatus.connected) {
+          controller
+            ..addError(const ConnectionUnavailableError())
+            ..close();
+          return;
+        }
+        final requestId = _protocol.nextId();
+        try {
+          final payload = _protocol.encodeRequest(requestId, method, params,
+              session: session, txn: txn);
+          _streams[requestId] = controller;
+          channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+        } catch (error, stackTrace) {
+          // Not sent, for example because a binding cannot be encoded.
+          _streams.remove(requestId);
+          controller
+            ..addError(error, stackTrace)
+            ..close();
+          return;
+        }
+        id = requestId;
+        final timeout = _requestTimeout;
+        if (timeout != null) {
+          // Only the wait for the first reply is limited: a stream may then
+          // run for as long as its query does.
+          _firstFrame[requestId] = Timer(timeout, () {
+            _firstFrame.remove(requestId);
+            if (_streams.remove(requestId) == null) return;
+            // The error comes once the query has stopped, so that a
+            // transaction is not committed while it still runs.
+            unawaited(_cancelOnServer(requestId, session).whenComplete(() {
+              if (controller.isClosed) return;
+              controller
+                ..addError(RequestTimeoutError(method, timeout))
+                ..close();
+            }));
+          });
+        }
+      },
+      onCancel: () {
+        final requestId = id;
+        if (requestId == null) return null;
+        _firstFrame.remove(requestId)?.cancel();
+        if (_streams.remove(requestId) == null || _channel == null) {
+          // A stream that timed out may still be stopping on the server.
+          return _cancelling[requestId]?.future;
+        }
+        // Cancelled before the end, so stop the work on the server too, and
+        // wait until it has stopped: a stream in a transaction is still
+        // using it until then, so committing earlier would cut it short.
+        return _cancelOnServer(requestId, session);
+      },
+    );
+    return controller.stream;
+  }
+
+  /// Cancels the stream [requestId] on the server, and completes once the
+  /// server has ended it.
+  ///
+  /// If the server refuses the cancel, or does not end the stream within the
+  /// request timeout, the query may still be running. The socket is then
+  /// dropped, which stops it, and the usual reconnect follows.
+  Future<void> _cancelOnServer(String requestId, Uuid? session) {
+    final channel = _channel;
+    final ended = Completer<void>();
+    _cancelling[requestId] = ended;
+    void abandon() {
+      // Once the stream has ended the query has stopped, so a cancel that
+      // fails because it came too late is harmless.
+      if (_cancelling[requestId] != ended) return;
+      if (channel != null) _resetChannel(channel);
+      _ended(requestId);
+    }
+
+    unawaited(_call('query_cancel', [requestId], session: session)
+        .then((_) {}, onError: (_) => abandon()));
+    final timeout = _requestTimeout;
+    return timeout == null
+        ? ended.future
+        : ended.future.timeout(timeout, onTimeout: abandon);
+  }
+
+  void _ended(String requestId) => _cancelling.remove(requestId)?.complete();
+
+  /// Sends a request on the current socket. Unlike [rpc] this does not need
+  /// the connection to be fully restored, so it is used to replay the session.
+  Future<Object?> _call(String method, List<Object?> params,
+      {Uuid? session, Uuid? txn}) async {
+    final channel = _channel;
+    if (channel == null) throw const ConnectionUnavailableError();
     final id = _protocol.nextId();
     final completer = Completer<Object?>();
+    final payload =
+        _protocol.encodeRequest(id, method, params, session: session, txn: txn);
+    // A variable is kept as it was sent, decoded from the request itself, so
+    // that later changes to the caller's objects cannot change what a
+    // reconnect replays.
+    final sent = method == 'let' ? _paramsOf(payload) : params;
     _pending[id] = completer;
-    final payload = _protocol.encodeRequest(id, method, params);
-    channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
-    final result = await completer.future;
-    _trackSession(method, params, result);
+    try {
+      channel.sink.add(_codec.isBinary ? payload : utf8.decode(payload));
+    } catch (_) {
+      _pending.remove(id);
+      rethrow;
+    }
+    final timeout = _requestTimeout;
+    final Object? result;
+    if (timeout == null) {
+      result = await completer.future;
+    } else {
+      result = await completer.future.timeout(timeout, onTimeout: () {
+        // Forget the request, so a late reply is dropped.
+        _pending.remove(id);
+        // The server may still have applied a change to the session, so it
+        // may no longer match the one tracked here. Start again on a new
+        // socket, which restores the session as it is known.
+        if (_sessionMethods.contains(method)) _resetChannel(channel);
+        throw RequestTimeoutError(method, timeout);
+      });
+    }
+    (session == null ? _session : _attached[session])
+        ?.apply(method, sent, result);
     return result;
   }
 
-  void _trackSession(String method, List<Object?> params, Object? result) {
-    switch (method) {
-      case 'use':
-        if (params.isNotEmpty && params[0] != null) {
-          _namespace = params[0] as String;
-        }
-        if (params.length > 1 && params[1] != null) {
-          _database = params[1] as String;
-        }
-      case 'signin':
-      case 'signup':
-        _token = _extractToken(result);
-      case 'authenticate':
-        if (params.isNotEmpty) _token = params[0] as String?;
-      case 'invalidate':
-        _token = null;
-    }
-  }
+  List<Object?> _paramsOf(List<int> payload) =>
+      ((_codec.decode(payload) as Map)['params'] as List).cast<Object?>();
 
-  String? _extractToken(Object? result) {
-    if (result is String) return result;
-    if (result is Map && result['token'] is String) {
-      return result['token'] as String;
-    }
-    return null;
+  /// Calls that change the server's session.
+  static const _sessionMethods = {
+    'use',
+    'signin',
+    'signup',
+    'authenticate',
+    'invalidate',
+    'let',
+    'unset',
+    'reset',
+    'refresh',
+    'attach',
+    'detach',
+    'begin',
+    'commit',
+    'cancel',
+  };
+
+  /// Abandons [channel] as if the server had dropped it, so the usual
+  /// reconnect follows.
+  void _resetChannel(WebSocketChannel channel) {
+    if (!identical(_channel, channel)) return;
+    final subscription = _subscription;
+    _onDisconnected(null);
+    unawaited(subscription?.cancel());
+    unawaited(_closeChannel(channel));
   }
 
   void _onMessage(dynamic data) {
@@ -154,6 +388,27 @@ class WebSocketEngine implements Engine {
           completer.completeError(error);
         } else {
           completer.complete(result);
+        }
+      case RpcResponse(:final id, :final result, :final error)
+          when _streams.containsKey(id):
+        _firstFrame.remove(id)?.cancel();
+        final controller = _streams[id]!;
+        if (error != null) {
+          _streams.remove(id);
+          controller
+            ..addError(error)
+            ..close();
+        } else {
+          controller.add(result);
+          if (result is Map && result['stream'] == 'end') {
+            _streams.remove(id);
+            controller.close();
+          }
+        }
+      case RpcResponse(:final id, :final result, :final error)
+          when _cancelling.containsKey(id):
+        if (error != null || (result is Map && result['stream'] == 'end')) {
+          _ended(id);
         }
       case RpcNotification(:final message):
         if (!_liveController.isClosed) _liveController.add(message);
@@ -169,6 +424,8 @@ class WebSocketEngine implements Engine {
     _failPending(error == null
         ? const ConnectionUnavailableError()
         : SurrealError('Connection lost', cause: error));
+    // A drop while a reconnect is under way is handled by that loop.
+    if (_reconnecting) return;
     if (_reconnect.enabled) {
       unawaited(_reconnectLoop());
     } else {
@@ -177,35 +434,171 @@ class WebSocketEngine implements Engine {
   }
 
   Future<void> _reconnectLoop() async {
+    _reconnecting = true;
     _setStatus(ConnectionStatus.reconnecting);
-    var attempt = 0;
-    while (!_intentionalClose &&
-        (_reconnect.attempts < 0 || attempt < _reconnect.attempts)) {
-      attempt++;
-      await Future<void>.delayed(_reconnect.delayForAttempt(attempt));
-      if (_intentionalClose) return;
-      try {
-        await _connect();
-        await _restoreSession();
-        await _onReconnect?.call();
+    try {
+      var attempt = 0;
+      while (!_intentionalClose &&
+          (_reconnect.attempts < 0 || attempt < _reconnect.attempts)) {
+        attempt++;
+        await Future<void>.delayed(_reconnect.delayForAttempt(attempt));
+        if (_intentionalClose) return;
+        try {
+          await _connect();
+          // The server behind the URL may have changed, so it is checked
+          // before anything is sent to it or anyone is told it is back.
+          await _onVerify?.call(_call);
+          await _restoreSession();
+        } catch (_) {
+          if (_intentionalClose) return;
+          // Close whatever this attempt opened before trying again.
+          await _dropChannel();
+          continue;
+        }
+        if (_intentionalClose) return;
+        _setStatus(ConnectionStatus.connected);
+        try {
+          await _onReconnect?.call();
+        } catch (_) {
+          // The hook reports its own failures, such as a live query that
+          // could not be restarted. The connection itself is restored.
+        }
+        // A drop while the hook ran was not handled, because this loop was
+        // still running, so try again.
+        if (_channel == null && !_intentionalClose) {
+          _setStatus(ConnectionStatus.reconnecting);
+          continue;
+        }
         return;
-      } catch (_) {
-        _setStatus(ConnectionStatus.reconnecting);
       }
+      if (!_intentionalClose) _setStatus(ConnectionStatus.disconnected);
+    } finally {
+      _reconnecting = false;
     }
-    _setStatus(ConnectionStatus.disconnected);
   }
 
+  /// Replays the default session, then attaches and replays every attached
+  /// session.
   Future<void> _restoreSession() async {
-    if (_namespace != null || _database != null) {
-      await rpc('use', [_namespace, _database]);
+    await _restoreState(_session, null);
+    final attached = <Uuid, SessionState>{};
+    for (final MapEntry(key: id, value: state) in _attached.entries.toList()) {
+      // A session closed while earlier ones were replayed is left out.
+      if (!identical(_attached[id], state)) continue;
+      await _call('attach', const [], session: id);
+      attached[id] = state;
+      await _restoreState(state, id);
     }
-    if (_token != null) {
-      await rpc('authenticate', [_token]);
+    // Sessions closed once attached here could not send their own detach,
+    // as the connection was not ready, so send it now.
+    while (true) {
+      final closed = [
+        for (final MapEntry(key: id, value: state) in attached.entries)
+          if (!identical(_attached[id], state)) id,
+      ];
+      if (closed.isEmpty) break;
+      for (final id in closed) {
+        attached.remove(id);
+        await _call('detach', const [], session: id);
+      }
     }
+  }
+
+  Future<void> _restoreState(SessionState state, Uuid? session) async {
+    final namespace = state.replayNamespace;
+    final database = state.replayDatabase;
+    // A selection only partly known is made after authenticating, which may
+    // select the rest.
+    final known = namespace is! SurrealNone && database is! SurrealNone;
+    if (known && (namespace != null || database != null)) {
+      await _call('use', [namespace, database], session: session);
+    }
+    for (final MapEntry(:key, :value) in state.variables.entries.toList()) {
+      await _call('let', [key, value], session: session);
+    }
+    final token = state.token;
+    if (token != null) {
+      final refresh = state.refreshToken;
+      final expiry = tokenExpiry(token);
+      final expired = expiry != null && !expiry.isAfter(DateTime.now().toUtc());
+      final pair = {'access': token, 'refresh': refresh};
+      try {
+        if (expired && refresh != null) {
+          await _call('refresh', [pair], session: session);
+        } else {
+          try {
+            await _call('authenticate', [token], session: session);
+          } on ResponseError catch (error) {
+            if (refresh == null || !rejectsAuthentication(error)) rethrow;
+            await _call('refresh', [pair], session: session);
+          }
+        }
+      } on ResponseError catch (error) {
+        // Any other failure fails the attempt, which is tried again.
+        if (!rejectsAuthentication(error)) rethrow;
+        // The server rejected the token, and the refresh token if there was
+        // one, for example because they expired. The driver may sign in
+        // again; if that fails for now, the attempt fails with the tokens
+        // kept, so the next one tries again.
+        final signedIn = await _onAuthenticationLost?.call(session, error,
+            (method, params) => _call(method, params, session: session));
+        // The connection itself is fine, so otherwise carry on without them
+        // rather than failing every attempt.
+        if (signedIn != true) state.setTokens(null, null);
+      }
+    }
+    if (!known) {
+      if (namespace is! SurrealNone || database is! SurrealNone) {
+        await _useKeeping(namespace, database, session);
+      }
+    } else if (token != null &&
+        (namespace == null ||
+            database == null ||
+            state.replayNamespace != namespace ||
+            state.replayDatabase != database)) {
+      // Cleared, or changed by authenticating, which selects what the
+      // token names.
+      await _call('use', [namespace, database], session: session);
+    }
+  }
+
+  /// Selects [namespace] and [database], keeping the session's own for one
+  /// that is NONE.
+  Future<void> _useKeeping(
+      Object? namespace, Object? database, Uuid? session) async {
+    if (codec is! CborCodec) {
+      // NONE would arrive as null and clear it, so send what is selected.
+      final result = await _call(
+          'query',
+          [
+            'RETURN [session::ns(), session::db()]',
+            const <String, Object?>{},
+          ],
+          session: session);
+      final [current] = result! as List<Object?>;
+      final [ns, db] = (current! as Map)['result'] as List<Object?>;
+      if (namespace is SurrealNone) namespace = ns;
+      if (database is SurrealNone) database = db;
+    }
+    await _call('use', [namespace, database], session: session);
   }
 
   void _failPending(Object error) {
+    for (final timer in _firstFrame.values) {
+      timer.cancel();
+    }
+    _firstFrame.clear();
+    for (final ended in _cancelling.values) {
+      ended.complete();
+    }
+    _cancelling.clear();
+    final streams = List.of(_streams.values);
+    _streams.clear();
+    for (final controller in streams) {
+      controller
+        ..addError(error)
+        ..close();
+    }
     final pending = List.of(_pending.values);
     _pending.clear();
     for (final completer in pending) {

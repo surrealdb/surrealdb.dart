@@ -74,6 +74,16 @@ void main() {
       expect(rows.length, 1);
     });
 
+    test('a BigInt beyond 64 bits arrives exact', () async {
+      final big = BigInt.one << 63;
+      final [type, value] = await db.query(
+        r'RETURN type::of($big); RETURN <string> $big',
+        bindings: {'big': big},
+      );
+      expect(type, 'decimal');
+      expect(value, '$big');
+    });
+
     test('live query receives a create notification', () async {
       await db.query('DEFINE TABLE IF NOT EXISTS person');
       final live = await db.live('person');
@@ -83,6 +93,22 @@ void main() {
 
       final message = await received.timeout(const Duration(seconds: 5));
       expect(message.action, LiveAction.create);
+
+      await live.kill();
+    });
+
+    test('a diff live query reports the record id', () async {
+      await db.query('DEFINE TABLE IF NOT EXISTS person');
+      await db.create(const RecordId('person', 'diff'), {'age': 1});
+      final live = await db.live('person', diff: true);
+      final received = live.stream.first;
+
+      await db.merge(const RecordId('person', 'diff'), {'age': 2});
+
+      final message = await received.timeout(const Duration(seconds: 5));
+      expect(message.action, LiveAction.update);
+      expect(message.recordId, const RecordId('person', 'diff'));
+      expect(message.value, isA<List<Object?>>());
 
       await live.kill();
     });
@@ -162,6 +188,34 @@ void main() {
 
       final message = await received.timeout(const Duration(seconds: 5));
       expect(message.action, LiveAction.create);
+
+      await live.kill();
+    });
+
+    test('a diff live query reports the record id over JSON', () async {
+      await db.query('DEFINE TABLE IF NOT EXISTS widget');
+      await db.create(const RecordId('widget', 'diff'), {'size': 1});
+      final live = await db.live('widget', diff: true);
+      final received = live.stream.first;
+
+      await db.merge(const RecordId('widget', 'diff'), {'size': 2});
+
+      final message = await received.timeout(const Duration(seconds: 5));
+      expect(message.recordId, const RecordId('widget', 'diff'));
+
+      await live.kill();
+    });
+
+    test('a diff live query reports a compound record id over JSON', () async {
+      await db.query('DEFINE TABLE IF NOT EXISTS widget');
+      await db.query("CREATE widget:[1, 'a'] SET size = 1");
+      final live = await db.live('widget', diff: true);
+      final received = live.stream.first;
+
+      await db.query("UPDATE widget:[1, 'a'] SET size = 2");
+
+      final message = await received.timeout(const Duration(seconds: 5));
+      expect(message.recordId, const RecordId('widget', [1, 'a']));
 
       await live.kill();
     });

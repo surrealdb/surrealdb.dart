@@ -10,9 +10,22 @@ export 'src/cbor/tags.dart' show SurrealCborTags;
 export 'src/errors.dart';
 export 'src/live_query.dart' show LiveQuery;
 export 'src/protocol/codec.dart' show SurrealCodec, SurrealFormat;
-export 'src/surreal.dart' show Surreal;
+export 'src/surreal.dart'
+    show
+        ApiResponse,
+        Surreal,
+        SurrealApi,
+        SurrealQueryable,
+        SurrealSession,
+        SurrealSessionMethods,
+        SurrealTransaction,
+        isSupportedServerVersion,
+        maximumServerVersion,
+        minimumServerVersion;
 export 'src/types/auth.dart';
 export 'src/types/connection.dart';
+export 'src/types/export.dart';
 export 'src/types/live.dart';
 export 'src/types/patch.dart';
+export 'src/types/query_frame.dart';
 export 'src/value/value.dart';
