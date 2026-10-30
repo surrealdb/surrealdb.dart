@@ -225,7 +225,10 @@ mixin SurrealQueryable {
 SurrealValue _thing(Object resource) {
   if (resource is SurrealValue) return resource;
   if (resource is String) {
-    return resource.contains(':') ? StringRecordId(resource) : Table(resource);
+    // A string is a table, as in the other SDKs: never a record id, even if it
+    // looks like one. Use a RecordId, or a StringRecordId to have the server
+    // parse a `table:id` string.
+    return Table(resource);
   }
   throw ArgumentError(
       'A resource must be a String, Table, RecordId, StringRecordId, or '
