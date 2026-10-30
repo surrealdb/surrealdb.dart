@@ -68,6 +68,10 @@ void main() {
     expect(server.requests.last.params, ['a', 'b']);
   });
 
+  test('requests do not time out unless the caller asks for it', () {
+    expect(const ConnectOptions().requestTimeout, isNull);
+  });
+
   test('a null request timeout waits for the reply', () async {
     await db.connect(server.url,
         options: const ConnectOptions(requestTimeout: null));
