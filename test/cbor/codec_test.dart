@@ -76,6 +76,16 @@ void main() {
       expect(roundTrip(id), const RecordId('person', 'tobie'));
     });
 
+    test('a StringRecordId goes on the wire as text', () {
+      // Tag 8 over the text `person:1`, for the server to parse, rather than
+      // tag 8 over a [table, key] pair resolved here. Keeping the text form is
+      // the whole point of StringRecordId.
+      expect(codec.encode(const StringRecordId('person:1')),
+          [0xc8, 0x68, ...'person:1'.codeUnits]);
+      expect(codec.encode(const RecordId('person', '1')).take(2),
+          [0xc8, 0x82]);
+    });
+
     test('Uuid', () {
       final uuid = Uuid('8c6c5b1e-3a3a-4b3a-9b3a-1a2b3c4d5e6f');
       expect(roundTrip(uuid), uuid);

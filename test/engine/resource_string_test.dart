@@ -29,6 +29,11 @@ void main() {
 
   test('a StringRecordId is sent for the server to parse', () async {
     await db.select(const StringRecordId('person:1'));
-    expect(server.requests.last.params.first, const StringRecordId('person:1'));
+    // The wire carries tag 8 over the text `person:1`, which the server
+    // parses. The codec reads that text form back as the record id it names,
+    // so what the fake server decodes is a RecordId and not a Table -- the
+    // distinction that matters here. The text form itself is pinned by
+    // `a StringRecordId goes on the wire as text` in test/cbor/codec_test.dart.
+    expect(server.requests.last.params.first, const RecordId('person', 1));
   });
 }
